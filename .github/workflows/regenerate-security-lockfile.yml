@@ -1,0 +1,34 @@
+name: Regenerate security lockfile (temporary)
+on:
+  push:
+    branches:
+      - fix/sync-upstream-doc-index-20261014
+    paths:
+      - .github/workflows/regenerate-security-lockfile.yml
+permissions:
+  contents: write
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/sync-upstream-doc-index-20261014
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Refresh patched transitive dependency lockfile
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check:audit
+      - name: Commit refreshed lockfile
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(security): refresh lockfile with patched transitive dependencies'
+            git push origin HEAD:fix/sync-upstream-doc-index-20261014
+          fi

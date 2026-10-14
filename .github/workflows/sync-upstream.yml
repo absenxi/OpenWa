@@ -88,22 +88,29 @@ jobs:
             # Let rerere apply any resolution Git has learned previously.
             git rerere || true
 
-            # Documentation index is non-executable; keep our media migration entry and
-            # include newly introduced upstream migrations from their version.
+            # Merge the append-only migration index without discarding upstream entries.
             if git diff --name-only --diff-filter=U | grep -qx 'docs/05-database-design.md'; then
               git checkout --theirs docs/05-database-design.md
-              # Restore our migration's documentation entry while retaining upstream's new entries.
               python3 - <<'PY'
           from pathlib import Path
+          import re
           path = Path("docs/05-database-design.md")
-          data = path.read_text()
-          marker = "└── 1790812800000-AddMessageWindowIndexes.ts"
-          own = "├── 1790770000000-AddMediaTemplateFields.ts   # adds template media fields"
-          if own not in data:
-              if marker not in data:
-                  raise SystemExit("Cannot safely update the migration index; upstream layout changed")
-              data = data.replace(marker, own + "\n" + marker, 1)
-              path.write_text(data)
+          content = path.read_text()
+          entry = "1790770000000-AddMediaTemplateFields.ts"
+          if entry not in content:
+              lines = content.splitlines(keepends=True)
+              candidates = [i for i, line in enumerate(lines) if re.match(r"^[├└]── \d{13}-[^\n]+\.ts", line)]
+              if not candidates:
+                  raise SystemExit("Migration index not found; manual resolution required")
+              insertion = next((i for i in candidates if int(re.search(r"\d{13}", lines[i]).group()) > 1790770000000), candidates[-1] + 1)
+              if insertion == candidates[-1] + 1:
+                  last = candidates[-1]
+                  lines[last] = lines[last].replace("└── ", "├── ", 1)
+                  prefix = "└── "
+              else:
+                  prefix = "├── "
+              lines.insert(insertion, prefix + entry + "   # adds template media fields\n")
+              path.write_text("".join(lines))
           PY
               git add docs/05-database-design.md
             fi
