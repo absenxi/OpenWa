@@ -142,12 +142,12 @@ jobs:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
           BEHIND: ${{ steps.merge.outputs.behind }}
         run: |
-          if gh pr view "$SYNC_BRANCH" --json url --jq .url > /dev/null 2>&1; then
+          if gh pr view "$SYNC_BRANCH" --repo "$GITHUB_REPOSITORY" --json url --jq .url > /dev/null 2>&1; then
             echo "Sync PR is already open — the force-push above moved it onto the latest upstream."
             exit 0
           fi
 
-          gh pr create --base main --head "$SYNC_BRANCH" \
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$SYNC_BRANCH" \
             --title "chore(sync): merge upstream main (${BEHIND} commit(s))" \
             --body "$(cat <<EOF
           Automated sync of \`${UPSTREAM_REPO}@main\` into the fork.
@@ -163,4 +163,4 @@ jobs:
         if: inputs.automerge && steps.merge.outputs.synced == 'true'
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
-        run: gh pr merge "$SYNC_BRANCH" --merge --auto --delete-branch
+        run: gh pr merge "$SYNC_BRANCH" --repo "$GITHUB_REPOSITORY" --merge --auto --delete-branch
