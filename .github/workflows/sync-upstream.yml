@@ -14,8 +14,8 @@ name: Sync Upstream
 #   Settings -> Actions -> General -> Enable GitHub Actions for this repository. Actions are off by
 #   default on a fork, and a disabled workflow never fires its schedule. Settings -> Actions ->
 #   General -> Workflow permissions must also allow the default token to write.
-# The upstream repository is public, so reading it needs no secret; the only credential in this file
-# is the default GITHUB_TOKEN, scoped to contents:write and pull-requests:write.
+# The upstream repository is public, so reading it needs no secret; the sync uses the UPSTREAM_SYNC_TOKEN repository secret (a fine-grained PAT with Contents,
+# Workflows, and Pull requests read/write) to push upstream workflow file changes.
 
 on:
   schedule:
@@ -50,6 +50,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Merge upstream main into the sync branch
         id: merge
@@ -138,7 +139,7 @@ jobs:
       - name: Open or update the sync pull request
         if: steps.merge.outputs.synced == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
           BEHIND: ${{ steps.merge.outputs.behind }}
         run: |
           if gh pr view "$SYNC_BRANCH" --json url --jq .url > /dev/null 2>&1; then
@@ -161,5 +162,5 @@ jobs:
       - name: Auto-merge the sync pull request
         if: inputs.automerge && steps.merge.outputs.synced == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: gh pr merge "$SYNC_BRANCH" --merge --auto --delete-branch
