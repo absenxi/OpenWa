@@ -106,11 +106,14 @@ Alongside this async pipeline, a route may additionally declare a `response` con
   **before** the dedup persist — returning `503` only for a definitively-dead concrete-scoped WhatsApp
   session (no live engine or `FAILED`), with a `Retry-After` so a provider that retries a 503 only when
   that header is present comes back; recoverable statuses and `READY` pass through to a normal
-  `202`+enqueue so the worker can still fail fast and the dedup row still holds the delivery. A declared
+  `202`+enqueue so the worker can still fail fast and the dedup row still holds the delivery. The same
+  `503` with `Retry-After`, again before the dedup persist, answers a route declaring `response` while its
+  plugin is still being restored after startup: no worker can take the delivery yet and the provider wants
+  its answer now (see §25.7 for a route without `response`). A declared
   `ack` (`status`/`body`/`headers`) replaces the default `202 accepted`. For a route declaring `response`,
   the ack is returned without awaiting enqueue so a queue-disabled deployment cannot block the provider's
   deadline; the dedup row already persisted is the durability handle. A route with no `response` is
-  byte-identical to today's default fast-ack.
+  byte-identical to today's default fast-ack, while its plugin restores included.
 - **Plugin instance** — a first-class `instanceId` namespaced under a `pluginId`. One adapter can back
   many instances (for example, one external account per WhatsApp number). Each instance owns a host-minted
   ingress secret, a resolved session scope, and a config slice. It is a serializable field threaded
@@ -222,8 +225,11 @@ Four tables live on the data connection, each created by a hand-authored dual-di
 - **Egress.** The only sanctioned outbound path remains the SSRF-guarded `ctx.net.fetch`, scoped to the
   manifest's allowed hosts; a direct Node socket opened by the worker is not covered (see [30 - Plugin
   Sandboxing](./30-plugin-sandboxing.md)).
-- **Re-entrancy.** A reply issued _inside_ an ingress handler seeds the in-flight hook set, so an adapter's
-  own outbound message hook cannot echo-loop the reply back out to the external system.
+- **Re-entrancy.** A send issued from inside a hook handler is short-circuited for the event that handler
+  is running, so a hook cannot re-fire itself. A reply issued from an ingress handler carries no hook
+  context: it runs every plugin's `message:sending` hooks, the adapter's own included, so an adapter that
+  mirrors outbound messages to its provider must recognise and skip the replies it sent itself, for example
+  by the message id the send returned.
 
 ## 25.7 Scale and durability
 
@@ -237,6 +243,15 @@ dispatch when Redis is unreachable. Before Redis has ever connected, queue calls
 `REDIS_CONNECT_TIMEOUT_MS` (5s when unset or 0) from the first one, then fall back at once until it
 connects. Providers already deliver over unordered, at-least-once HTTP, so plugin handlers must be
 idempotent and treat ingress as a reconciliation trigger.
+
+A plugin's webhook handler has **5 s** (`INGRESS_DISPATCH_TIMEOUT_MS`) to finish. The host cannot cancel a
+handler that overruns it: the attempt is recorded as failed, the conversation lock is released and the
+delivery is retried (queued) or dead-lettered (inline), while the first run goes on and its work still
+lands. A handler that calls a slow upstream, or sends media, can therefore run twice for one delivery.
+Key every side effect on the delivery id (`req.deliveryId`) and hand work that can outlast the budget to
+a background task instead of awaiting it in the handler. The budget is short because a queue-disabled
+deployment answers the provider only after the inline dispatch, and providers abandon a request within a
+few seconds.
 
 A job waiting on that lock still holds one of the `INGRESS_WORKER_CONCURRENCY` worker slots (default
 10). A burst on one lane larger than that fills every slot with same-lane waiters, and events for other
@@ -267,6 +282,27 @@ deliver. A `pending` row found without a payload (only possible for imported/cor
 payloads are retired only with a recorded outcome) is excluded from the sweep and never replayed
 empty; nothing logs it, and it stays `pending` until `INGRESS_DEDUP_RETENTION_DAYS` prunes it.
 
+**Plugin restore window.** The gateway opens its port before a slow plugin restore has finished (see
+[19](./19-plugin-architecture.md), Restore on boot), so a delivery can arrive for a plugin that has no
+worker yet. A route declaring a `response` contract is refused with `503` and `Retry-After: 5` (§25.4),
+and the provider's retry is accepted once the plugin is up. Any other route is accepted and persisted
+as usual. A queued job goes back to the delayed set, without spending a retry attempt, until the plugin
+is up. It is held until the next multiple of `INGRESS_RETRY_DELAY_MS` (a period of at least a second), so every
+held job wakes at the same instants and the jobs of one wake come back in the order they were held. That
+order has two limits. Once the restore ends, the jobs of a wake are handled one after another, so those
+already held again come back a period later than those the worker reaches afterwards: earlier deliveries
+of a conversation can follow later ones for as long as the worker needs to go through the whole held
+backlog (milliseconds for a short one, seconds for thousands), and that backlog is handled ahead of newer
+jobs of other plugins. And BullMQ keeps insertion order for at most 4096 held jobs per millisecond: past
+that, the jobs of a wake come back ordered by their id. With the queue off the delivery is acked and not dispatched: its row stays `pending`, and the
+reconciler dispatches it on the first pass after the restore is over and the row is older than
+`INGRESS_RECONCILE_GRACE_MS`. With the defaults that is within a minute after the plugin is up for a row
+accepted at least a minute before it came up, and one to two minutes after the delivery for a later one.
+The reconciler leaves the rows of a restoring plugin out of its batch, so they do not hold back another
+plugin's. With the reconciler disabled
+(`INGRESS_RECONCILE_INTERVAL_MS=0`) nothing would replay a held row, so the delivery is dispatched at once
+and, with no worker to run it, files a dead letter that an operator can redrive.
+
 Table growth is bounded by construction rather than by operator hygiene: the per-instance ingress
 throttle caps the row-creation rate, dispatched rows slim to a marker + hash, and the two retention
 windows prune what remains — `INGRESS_DEDUP_RETENTION_DAYS` (default 7) for the dedup oracle and
@@ -281,7 +317,10 @@ row), and a row whose instance or bound session was deleted is dropped, since re
 deleted instance and a session delete purges its dead letters. A delivery whose completed job was
 already removed from the queue, or whose job lookup failed while Redis was down (or, for a Redis
 slow to start at boot, not yet connected within that first-connect wait), is dead-lettered anyway and
-may already have been delivered: check before redriving it. A dead-letter row the prune writes takes
+may already have been delivered: check before redriving it. The check that avoids a second open
+dead-letter row for one delivery reads before it writes, so two nodes pruning the same row at the same
+moment (replicas started together) can leave two, and redriving both delivers it twice. A dead-letter
+row the prune writes takes
 its conversation id from the plugin's current manifest route, as the live path does, so a row whose
 plugin package or route is gone, whose route declares no `conversationId` pointer, or whose pointer
 does not resolve in that delivery carries none and its redrive takes the per-instance lane. There is

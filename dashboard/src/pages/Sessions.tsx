@@ -52,6 +52,8 @@ import { PageHeader } from '../components/PageHeader';
 import { CustomSelect } from '../components/CustomSelect';
 import { Modal } from '../components/Modal';
 import './Sessions.css';
+import { formatLastActive, formatSessionStatus } from '../utils/sessionDisplay';
+import { normalizePhoneText } from '../utils/phone';
 
 /**
  * The hover title for a restriction: the engine's own cause token, plus when enforcement ends if
@@ -80,6 +82,8 @@ export function Sessions() {
   // The full-page spinner belongs to the FIRST load only (see fetchSessions).
   const initialLoadDone = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the last list read failed. `error` also carries a refused create, which says nothing about the list.
+  const [listFailed, setListFailed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   // Only the id: the detail modal renders the row as it is in `sessions` now, so a status push or a
@@ -169,6 +173,7 @@ export function Sessions() {
       // The list is current again, so an error left by an earlier failed read (or a create, whose toast
       // already reported it) no longer describes the page, and the recovery retry is available again.
       setError(null);
+      setListFailed(false);
       retriedThisConnect.current = false;
       // Keep the shared React Query cache (read by the Dashboard via useSessionsQuery /
       // useSessionStatsQuery) in sync after this page's mutations reload local state — otherwise the
@@ -184,6 +189,7 @@ export function Sessions() {
       if (request < listApplied.current) return sessionsRef.current;
       listReadFailed.current = true;
       setError(err instanceof Error ? err.message : t('sessions.create.errorDefault'));
+      setListFailed(true);
       return [];
     } finally {
       initialLoadDone.current = true;
@@ -638,17 +644,9 @@ export function Sessions() {
     }
   };
 
-  const formatLastActive = (date?: string | null) => {
-    if (!date) return t('common.never');
-    const diff = Date.now() - new Date(date).getTime();
-    if (diff < 60000) return t('common.justNow');
-    if (diff < 3600000) return t('common.minAgo', { count: Math.floor(diff / 60000) });
-    return new Date(date).toLocaleDateString();
-  };
-
-  const formatStatus = (status: string) => t(`sessionStatus.${status}`, { defaultValue: status });
-
   const filteredSessions = filterSessions(sessions, searchQuery, statusFilter);
+  // A failed read says nothing about how many sessions there are: with none held, the banner is the only message.
+  const listUnknown = listFailed && sessions.length === 0;
   const existingSessionNames = sessions.map(s => s.name);
   // Empty is a disabled button, not a message: the form stays quiet until the user types something.
   const nameIssues = newSessionName ? sessionNameIssues(newSessionName, existingSessionNames) : [];
@@ -730,7 +728,7 @@ export function Sessions() {
             background: 'rgba(239, 68, 68, 0.12)',
             padding: '1rem',
             borderRadius: '8px',
-            color: 'var(--error)',
+            color: 'var(--error-text)',
             marginBottom: '1rem',
           }}
         >
@@ -893,7 +891,18 @@ export function Sessions() {
                       maxLength={15}
                       placeholder={t('sessions.pairing.phonePlaceholder')}
                       value={phoneNumber}
-                      onChange={e => setPhoneNumber(e.target.value.replace(/\D/g, ''))}
+                      // A composition in progress is left as typed, since rewriting it garbles what the IME commits;
+                      // it is read when the composition ends. Pasted and directly typed text is read at once.
+                      onChange={e =>
+                        setPhoneNumber(
+                          (e.nativeEvent as InputEvent).isComposing
+                            ? e.target.value
+                            : normalizePhoneText(e.target.value).replace(/\D/g, ''),
+                        )
+                      }
+                      onCompositionEnd={e =>
+                        setPhoneNumber(normalizePhoneText(e.currentTarget.value).replace(/\D/g, ''))
+                      }
                       onKeyDown={e => e.key === 'Enter' && handleGeneratePairingCode()}
                     />
                     <p className="input-hint" style={{ marginBottom: '1.5rem' }}>
@@ -908,7 +917,7 @@ export function Sessions() {
                       {requestingPairing ? (
                         <>
                           <Loader2 className="animate-spin" size={16} />
-                          <span style={{ marginLeft: '0.5rem' }}>{t('sessions.pairing.generating')}</span>
+                          <span style={{ marginInlineStart: '0.5rem' }}>{t('sessions.pairing.generating')}</span>
                         </>
                       ) : (
                         t('sessions.pairing.generateButton')
@@ -976,7 +985,9 @@ export function Sessions() {
             </div>
             <div className="detail-item">
               <span className="detail-label">{t('sessions.details.status')}</span>
-              <span className={`status-badge ${selectedSession.status}`}>{formatStatus(selectedSession.status)}</span>
+              <span className={`status-badge ${selectedSession.status}`}>
+                {formatSessionStatus(t, selectedSession.status)}
+              </span>
             </div>
             <div className="detail-item">
               <span className="detail-label">{t('sessions.details.sessionId')}</span>
@@ -1224,7 +1235,7 @@ export function Sessions() {
       )}
 
       <div className="sessions-grid">
-        {filteredSessions.length === 0 ? (
+        {filteredSessions.length === 0 && !listUnknown ? (
           <div className="empty-state">
             <QrCode size={48} />
             <h3>{t('sessions.empty.title')}</h3>
@@ -1235,7 +1246,7 @@ export function Sessions() {
             <div key={session.id} className="session-card">
               <div className="card-header">
                 <h3 title={session.name}>{session.name}</h3>
-                <span className={`status-pill ${session.status}`}>{formatStatus(session.status)}</span>
+                <span className={`status-pill ${session.status}`}>{formatSessionStatus(t, session.status)}</span>
               </div>
 
               {awaitsPairing(session) ? (
@@ -1266,7 +1277,7 @@ export function Sessions() {
                   </div>
                   <div className="info-row">
                     <span className="info-label">{t('sessions.card.lastActive')}</span>
-                    <span className="info-value">{formatLastActive(session.lastActive)}</span>
+                    <span className="info-value">{formatLastActive(t, session.lastActive)}</span>
                   </div>
                   {(session.status === 'failed' || session.status === 'action_required') && session.lastError ? (
                     <div className="info-row session-error">

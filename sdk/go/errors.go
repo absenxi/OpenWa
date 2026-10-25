@@ -29,7 +29,8 @@ var (
 	ErrForbidden = errors.New("openwa: forbidden")
 	// ErrNotFound is returned for a 404.
 	ErrNotFound = errors.New("openwa: not found")
-	// ErrConflict is returned for a 409 (typically an engine-not-ready condition).
+	// ErrConflict is returned for a 409: a conflicting state, typically a session that is not ready for the
+	// operation, or a keyed send that is pending or may already have been sent (see the error code).
 	ErrConflict = errors.New("openwa: conflict")
 	// ErrRateLimited is returned for a 429 (too many requests). The global rate
 	// limiter's 429 lifts when its window expires (seconds for the per-second
@@ -44,18 +45,32 @@ var (
 	// ErrNotImplemented is returned for a 501 (the active engine does not
 	// support this operation).
 	ErrNotImplemented = errors.New("openwa: not implemented")
-	// ErrServiceUnavailable is returned for a 503 — a transport failure rather
-	// than a refusal: WhatsApp never replied, the socket was down, or the
-	// request budget ran out. It is retryable, but a catalog 503 can persist
-	// because WhatsApp may never answer that query, so bound any retry. The
-	// non-idempotent sends are deliberately left unbounded by the gateway so a
-	// slow WhatsApp reply never answers one, and in a multi-node deployment a
-	// forward that fails before reaching the owner node answers 503. A 503 from
-	// the owner itself is relayed unchanged and means the engine did not
-	// confirm in time, so a bounded write may still have been applied; re-read
-	// the state before repeating it. A forward that fails after the request was
-	// sent answers 502 or 504 instead: the owner may already have carried it
-	// out, so do not repeat a non-idempotent send on those unchecked.
+	// ErrServiceUnavailable is returned for a 503: the gateway could not
+	// complete the request right now. The path to WhatsApp failed (WhatsApp
+	// never replied, the socket was down, or the request budget ran out), the
+	// gateway is draining or short of a dependency, or, on Baileys, WhatsApp
+	// itself throttled (code 429) or timed out (code 408) the request; a
+	// throttle or timeout names its code in the message. It is retryable, but
+	// back off and retry later instead of at once: repeating a throttled
+	// request straight away prolongs the throttle. A catalog 503 can persist
+	// because WhatsApp may never answer that query, so bound any retry.
+	//
+	// On a send or a single write, a throttle turned the request away before it
+	// ran, so nothing was sent or applied, and a keyed send frees its
+	// Idempotency-Key for the retry. A group settings update with several
+	// fields applies them one at a time, so a 503 on a later field, a throttle
+	// included, leaves the earlier ones applied; the message lists them after
+	// "already applied:", so re-read the settings before retrying, or send one
+	// field per request. A timeout proves nothing: the write may still have
+	// been applied, and a keyed send keeps its key taken. The non-idempotent
+	// sends are deliberately left unbounded by the gateway so a slow WhatsApp
+	// reply never answers one, and in a multi-node deployment a forward that
+	// fails before reaching the owner node answers 503. A 503 from the owner
+	// itself is relayed unchanged and keeps its meaning, so a bounded write
+	// that timed out may still have been applied; re-read the state before
+	// repeating it. A forward that fails after the request was sent answers 502
+	// or 504 instead: the owner may already have carried it out, so do not
+	// repeat a non-idempotent send on those unchecked.
 	ErrServiceUnavailable = errors.New("openwa: service unavailable")
 )
 
@@ -65,11 +80,12 @@ var (
 type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
-	// Message is a human-readable description derived from the NestJS error
-	// envelope (or the raw body when the response is not the standard shape).
+	// Message is a human-readable description: the "message" of the JSON body
+	// (the gateway's NestJS error envelope, or a proxy's own), the raw body when
+	// it is not JSON, else the text of the status.
 	Message string
-	// Kind is the value of the NestJS envelope's "error" field (e.g.
-	// "Not Found", "Conflict"), when present.
+	// Kind is the value of the body's "error" field (e.g. "Not Found",
+	// "Conflict"), when it is a string.
 	Kind string
 	// Body is the parsed JSON body, or the raw string when the body is not
 	// valid JSON.
@@ -134,45 +150,27 @@ func (e *TimeoutError) Error() string {
 
 func (e *TimeoutError) Unwrap() error { return e.Err }
 
-// nestEnvelope is the standard NestJS error shape:
-// {"statusCode": int, "message": string|[]string, "error": string}.
-type nestEnvelope struct {
-	StatusCode int             `json:"statusCode"`
-	Message    json.RawMessage `json:"message"`
-	Error      string          `json:"error"`
-}
-
-// parseAPIError builds an *APIError from a raw response body, extracting a
-// readable message from the NestJS envelope when the body matches that shape.
+// parseAPIError builds an *APIError from a raw response body. The message is read from any JSON
+// object that carries one, so an error from a proxy or WAF in front of the gateway reads like the
+// gateway's own.
 func parseAPIError(status int, raw []byte, context string, header http.Header) *APIError {
 	var body any
-	var envelope *nestEnvelope
-
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &body); err != nil {
 			body = string(raw)
 		}
-		var env nestEnvelope
-		if err := json.Unmarshal(raw, &env); err == nil && env.StatusCode != 0 {
-			envelope = &env
-		}
 	}
-
-	message := messageFromEnvelope(envelope, body)
-	kind := ""
-	if envelope != nil {
-		kind = envelope.Error
-	}
+	fields, _ := body.(map[string]any)
+	kind, _ := fields["error"].(string)
 
 	apiErr := &APIError{
 		StatusCode: status,
-		Message:    message,
+		Message:    messageFromBody(status, body),
 		Kind:       kind,
 		Body:       body,
 		Context:    context,
 		Header:     header,
 	}
-	fields, _ := body.(map[string]any)
 	apiErr.Code, _ = fields["code"].(string)
 	// The body's retryAfterSeconds wins: send pacing puts its wait (possibly
 	// hours) only there, and a header added by a proxy must not shorten it.
@@ -184,20 +182,37 @@ func parseAPIError(status int, raw []byte, context string, header http.Header) *
 	return apiErr
 }
 
-func messageFromEnvelope(envelope *nestEnvelope, body any) string {
-	if envelope != nil && len(envelope.Message) > 0 {
-		// message may be a string or an array of strings.
-		var single string
-		if err := json.Unmarshal(envelope.Message, &single); err == nil {
-			return single
+// messageFromBody is the text of an error answer: the "message" of a JSON object (a string, or an
+// array whose strings are joined), else a plain-text body, else what the status itself says.
+func messageFromBody(status int, body any) string {
+	switch b := body.(type) {
+	case map[string]any:
+		switch m := b["message"].(type) {
+		case string:
+			if m != "" {
+				return m
+			}
+		case []any:
+			var parts []string
+			for _, p := range m {
+				if s, ok := p.(string); ok {
+					parts = append(parts, s)
+				}
+			}
+			if len(parts) > 0 {
+				return joinComma(parts)
+			}
 		}
-		var many []string
-		if err := json.Unmarshal(envelope.Message, &many); err == nil {
-			return joinComma(many)
+	case string:
+		if b != "" {
+			return b
 		}
 	}
-	if s, ok := body.(string); ok && s != "" {
-		return s
+	if status >= 300 && status < 400 {
+		return "Unexpected redirect (not followed; the API key is never re-sent to a redirect target)"
+	}
+	if text := http.StatusText(status); text != "" {
+		return text
 	}
 	return "request failed"
 }

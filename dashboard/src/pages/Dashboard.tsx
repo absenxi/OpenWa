@@ -16,6 +16,7 @@ import {
 import { PageHeader } from '../components/PageHeader';
 import { isSessionStarted } from '../utils/sessionActions';
 import './Dashboard.css';
+import { formatLastActive, formatSessionStatus } from '../utils/sessionDisplay';
 
 // recharts is heavy (~116 kB gzip); load the analytics section on demand so it never bloats the
 // main/login bundle, and only for an unscoped admin key: /stats/messages refuses every other key.
@@ -80,17 +81,6 @@ export function Dashboard() {
     { label: t('dashboard.stats.totalMessages'), value: totalMessages, icon: Activity },
   ];
 
-  const formatLastActive = (date?: string | null) => {
-    if (!date) return t('common.never');
-    const diff = Date.now() - new Date(date).getTime();
-    if (diff < 60000) return t('common.justNow');
-    if (diff < 3600000) return t('common.minAgo', { count: Math.floor(diff / 60000) });
-    if (diff < 86400000) return t('common.hoursAgo', { count: Math.floor(diff / 3600000) });
-    return new Date(date).toLocaleDateString();
-  };
-
-  const formatStatus = (status: string) => t(`sessionStatus.${status}`, { defaultValue: status });
-
   if (loading) {
     return (
       <div
@@ -106,7 +96,12 @@ export function Dashboard() {
     return (
       <div className="dashboard" style={{ padding: '2rem' }}>
         <div
-          style={{ background: 'rgba(239, 68, 68, 0.12)', padding: '1rem', borderRadius: '8px', color: 'var(--error)' }}
+          style={{
+            background: 'rgba(239, 68, 68, 0.12)',
+            padding: '1rem',
+            borderRadius: '8px',
+            color: 'var(--error-text)',
+          }}
         >
           {t('dashboard.errorPrefix', { message: error })}
         </div>
@@ -176,8 +171,8 @@ export function Dashboard() {
                   </span>
                 </div>
                 <span className="phone">{session.phone || '—'}</span>
-                <span className={`status-pill ${session.status}`}>{formatStatus(session.status)}</span>
-                <span className="last-active">{formatLastActive(session.lastActive)}</span>
+                <span className={`status-pill ${session.status}`}>{formatSessionStatus(t, session.status)}</span>
+                <span className="last-active">{formatLastActive(t, session.lastActive)}</span>
                 <div className="actions">
                   <button className="btn-sm" onClick={() => navigate('/sessions')}>
                     {t('dashboard.view')}

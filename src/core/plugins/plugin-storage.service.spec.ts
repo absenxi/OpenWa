@@ -283,6 +283,99 @@ describe('PluginStorageService per-plugin storage quota', () => {
       /storage quota exceeded.*max 52428800\)/,
     );
   });
+
+  describe('running total', () => {
+    const pluginDir = (id = 'quota-plugin'): string => path.join(dataDir, 'plugins', id);
+
+    it('reads the directory once, not on every write', async () => {
+      const storage = makeStorage(10 * 1024 * 1024);
+      const readdir = jest.spyOn(fs, 'readdirSync');
+      try {
+        for (let i = 0; i < 50; i++) await storage.set(`key-${i}`, 'x'.repeat(100));
+        expect(readdir.mock.calls.filter(([dir]) => String(dir) === pluginDir())).toHaveLength(1);
+      } finally {
+        readdir.mockRestore();
+      }
+    });
+
+    it('frees a deleted key and counts a replaced key at its new size', async () => {
+      const storage = makeStorage(1024);
+      await storage.set('a', 'x'.repeat(500)); // 502 bytes
+      await storage.set('b', 'y'.repeat(400)); // 402 bytes
+      await expect(storage.set('c', 'z'.repeat(300))).rejects.toThrow(/storage quota exceeded/);
+
+      await storage.delete('a');
+      await expect(storage.set('c', 'z'.repeat(300))).resolves.toBeUndefined(); // 402 + 302
+
+      await storage.set('b', 'y'.repeat(10)); // 402 -> 12 bytes
+      await expect(storage.set('d', 'w'.repeat(600))).resolves.toBeUndefined(); // 302 + 12 + 602
+      await expect(storage.set('e', 'v'.repeat(300))).rejects.toThrow(/storage quota exceeded/);
+    });
+
+    it('recounts from the directory before refusing, so files removed behind its back do not block writes', async () => {
+      const storage = makeStorage(1024);
+      await storage.set('a', 'x'.repeat(900)); // 902 bytes
+
+      for (const file of fs.readdirSync(pluginDir())) fs.unlinkSync(path.join(pluginDir(), file));
+
+      await expect(storage.set('b', 'y'.repeat(900))).resolves.toBeUndefined();
+      // The recount did not forget the new key: a third write that cannot fit is still refused.
+      await expect(storage.set('c', 'z'.repeat(300))).rejects.toThrow(/storage quota exceeded/);
+    });
+
+    it('starts again from zero once the plugin data is deleted', async () => {
+      const configService = {
+        get: (k: string) => (k === 'dataDir' ? dataDir : k === 'plugins.storageMaxBytes' ? 1024 : undefined),
+      } as unknown as ConfigService;
+      const service = new PluginStorageService(configService);
+      const first = service.createPluginStorage('reinstalled');
+      await first.set('state', 'x'.repeat(900));
+
+      service.deletePluginData('reinstalled');
+      const second = service.createPluginStorage('reinstalled');
+
+      await expect(second.set('state', 'y'.repeat(900))).resolves.toBeUndefined();
+    });
+
+    // The recount before a refusal puts a stale total right, so a write that ends up accepted cannot tell
+    // one from a correct total. What a stale total costs is a directory read on the main thread.
+    it('takes a deleted key out of the total, so a write that then fits does not read the directory', async () => {
+      const storage = makeStorage(1024);
+      await storage.set('a', 'x'.repeat(500)); // 502 bytes
+      await storage.set('b', 'y'.repeat(400)); // 402 bytes
+      await storage.delete('a');
+
+      const readdir = jest.spyOn(fs, 'readdirSync');
+      try {
+        // 402 + 302 fits the quota only once the 502 bytes of 'a' are out of the total.
+        await storage.set('c', 'z'.repeat(300));
+        expect(readdir.mock.calls.filter(([dir]) => String(dir) === pluginDir())).toHaveLength(0);
+      } finally {
+        readdir.mockRestore();
+      }
+    });
+
+    it('seeds the total again, once, after the plugin data is deleted', async () => {
+      const configService = {
+        get: (k: string) => (k === 'dataDir' ? dataDir : k === 'plugins.storageMaxBytes' ? 1024 : undefined),
+      } as unknown as ConfigService;
+      const service = new PluginStorageService(configService);
+      await service.createPluginStorage('reinstalled').set('state', 'x'.repeat(100));
+
+      service.deletePluginData('reinstalled');
+      const second = service.createPluginStorage('reinstalled');
+
+      const readdir = jest.spyOn(fs, 'readdirSync');
+      try {
+        // Small writes, so a total carried over from before the delete would still look right.
+        await second.set('a', 'y'.repeat(100));
+        await second.set('b', 'z'.repeat(100));
+        expect(readdir.mock.calls.filter(([dir]) => String(dir) === pluginDir('reinstalled'))).toHaveLength(1);
+      } finally {
+        readdir.mockRestore();
+      }
+    });
+  });
 });
 
 describe('PluginStorageService unreadable registry', () => {

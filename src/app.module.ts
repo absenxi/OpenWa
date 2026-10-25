@@ -143,7 +143,8 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       inject: [ConfigService],
       // The postgres branch runs its boot migrations under a cross-replica advisory lock inside
       // this factory (see pg-boot-migrations.ts) instead of TypeORM's unsynchronized built-in
-      // migrationsRun; the sqlite branches keep the library's default construction + initialize.
+      // migrationsRun; SQLite with synchronize is initialized there too, to deduplicate terminal webhook
+      // failures before the schema sync, and other sqlite options keep the library's default path.
       dataSourceFactory: createBootDataSource,
       useFactory: (configService: ConfigService) => {
         const dbType = configService.get<'sqlite' | 'postgres'>('dataDatabase.type', 'sqlite');
@@ -265,7 +266,12 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
 
     // Core modules
     HooksModule, // Global hook system for plugin integration
-    PluginsModule, // Global plugin system
+    // Global plugin system, kept ahead of ...queueModules. Nest runs the init hooks of global modules in the
+    // order it first meets them among the imports, and PluginLoaderService.onModuleInit must mark the plugins
+    // it restores before BullRegistrar starts the workers that take queued ingress jobs. This line and
+    // QueueModule's own import of PluginsModule each keep it ahead of BullModule; test/queue-on.e2e-spec.ts
+    // fails when neither does.
+    PluginsModule,
     LoggerModule,
     CacheModule,
     StorageModule,

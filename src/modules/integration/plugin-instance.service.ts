@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryDeepPartialEntity, Repository } from 'typeorm';
+import { In, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { PluginInstance } from './entities/plugin-instance.entity';
+import { ConversationMapping } from './entities/conversation-mapping.entity';
 import { isUniqueViolation } from '../../common/utils/db-errors';
+import { awaitNoOpenTransaction } from '../../common/utils/shared-connection';
 import type { PluginConfigSchema } from '../../core/plugins/plugin.interfaces';
 import { redactSecretConfig, restoreSecretConfig, SECRET_SENTINEL } from '../plugins/redact-config';
 // Type-only: the module binds this class to PLUGIN_INSTANCE_PORT with a `useExisting` alias, which
@@ -139,7 +141,25 @@ export class PluginInstanceService implements PluginInstancePort {
   }
 
   async remove(pluginId: string, instanceId: string): Promise<boolean> {
-    const result = await this.repo.delete({ id: `${pluginId}:${instanceId}` });
-    return (result.affected ?? 0) > 0;
+    // On SQLite every caller shares one connection: opened beside another caller's transaction, this one would be a
+    // savepoint in it or carry that one's writes, and either rollback could undo what the other had answered for.
+    if (!(await awaitNoOpenTransaction(this.repo.manager.dataSource))) {
+      throw new ServiceUnavailableException(
+        `Instance ${instanceId} was not deleted: another database transaction stayed open. Retry the delete.`,
+      );
+    }
+    return this.repo.manager.transaction(async manager => {
+      const result = await manager.delete(PluginInstance, { id: `${pluginId}:${instanceId}` });
+      // Its conversation mappings stay, so the same instance provisioned again keeps its provider
+      // conversations. A takeover they hold does not: it is scoped to the chat, not to the plugin, and
+      // with the instance gone nothing can hand the chat back, so it would keep every other plugin
+      // silent there for good.
+      await manager.update(
+        ConversationMapping,
+        { pluginId, instanceId, handoverState: In(['human', 'closed']) },
+        { handoverState: 'bot' },
+      );
+      return (result.affected ?? 0) > 0;
+    });
   }
 }

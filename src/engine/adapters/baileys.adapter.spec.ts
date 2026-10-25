@@ -2,9 +2,25 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as qrcode from 'qrcode';
+import * as messagingModule from './baileys-messaging';
+import { randomUUID } from 'crypto';
+import { DataSource } from 'typeorm';
+import { EngineRegistry } from '../engine-registry.service';
+import { LidMapping } from '../identity/lid-mapping.entity';
+import { LidMappingStoreService } from '../identity/lid-mapping-store.service';
+import { Session } from '../../modules/session/entities/session.entity';
+import { Message, MessageDirection } from '../../modules/message/entities/message.entity';
+import { MessageProjector } from '../../modules/session/message-projector.service';
+import { SessionLidResolver } from '../../modules/session/session-lid-resolver.service';
+import { ChatScopeService } from '../../modules/auth/chat-scope.service';
 
 jest.mock('../../common/media/load-remote-media', () => ({
   loadRemoteMediaBuffer: jest.fn(),
+}));
+
+// The probe runs a child process; its own spec drives the real one.
+jest.mock('./baileys-audio-probe', () => ({
+  describeAudio: jest.fn(() => Promise.resolve({ seconds: 0 })),
 }));
 
 // A fake Baileys socket: an event emitter wearing the methods the adapter calls.
@@ -60,6 +76,7 @@ class FakeSock extends EventEmitter {
   public removeContact = jest.fn().mockResolvedValue(undefined);
   public readMessages = jest.fn().mockResolvedValue(undefined);
   public chatModify = jest.fn().mockResolvedValue(undefined);
+  public executeUSyncQuery = jest.fn().mockResolvedValue(undefined);
   public addChatLabel = jest.fn().mockResolvedValue(undefined);
   public addLabel = jest.fn().mockResolvedValue(undefined);
   public removeChatLabel = jest.fn().mockResolvedValue(undefined);
@@ -122,6 +139,30 @@ jest.mock('@whiskeysockets/baileys', () => ({
   // Identity passthrough — the adapter wraps state.keys with this for session-store caching; tests
   // don't exercise the caching behavior itself, just need the real store object to flow through.
   makeCacheableSignalKeyStore: jest.fn((store: unknown) => store),
+  USyncQuery: class {
+    users: unknown[] = [];
+    protocols: string[] = [];
+    context = 'interactive';
+    withLIDProtocol() {
+      this.protocols.push('lid');
+      return this;
+    }
+    withContext(context: string) {
+      this.context = context;
+      return this;
+    }
+    withUser(user: unknown) {
+      this.users.push(user);
+      return this;
+    }
+  },
+  USyncUser: class {
+    id?: string;
+    withId(id: string) {
+      this.id = id;
+      return this;
+    }
+  },
   getContentType: jest.fn(() => 'conversation'),
   // The adapter now downloads via 'stream' mode, so resolve to an async-iterable of chunks (factory is
   // hoisted above imports, so this stays inline; tests override with the `streamOf` helper below).
@@ -156,13 +197,16 @@ import { NotFoundException, BadRequestException, ForbiddenException, HttpExcepti
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Dispatcher1Wrapper } from 'undici';
 import { BaileysAdapter, createProxyAgent } from './baileys.adapter';
+import { BaileysEvents } from './baileys-events';
 import {
   EditedMessage,
+  DeliveryStatus,
   EngineStatus,
   EngineEventCallbacks,
   GroupEvent,
   IncomingCallEvent,
   IncomingMessage,
+  InboundOutcome,
 } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
@@ -175,9 +219,11 @@ import { ChannelNotFoundError } from '../../common/errors/channel-not-found.erro
 import { ChatLabelsUnsupportedError } from '../../common/errors/chat-labels-unsupported.error';
 import { Boom } from '@hapi/boom';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
 import { LidNotMappedError } from '../../common/errors/lid-not-mapped.error';
 import { countsTowardSendBreaker, sentNothing } from '../../modules/message/send-pacing.service';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
+import { describeAudio } from './baileys-audio-probe';
 import * as safeLinkPreview from './safe-link-preview';
 
 const fakeStore = {
@@ -186,6 +232,7 @@ const fakeStore = {
   getMessages: jest.fn().mockResolvedValue([]),
   clearSession: jest.fn().mockResolvedValue(undefined),
   update: jest.fn().mockResolvedValue(undefined),
+  remove: jest.fn().mockResolvedValue(undefined),
 };
 
 // clearAllMocks keeps implementations: a store lookup one test taught to return a message must not
@@ -195,6 +242,7 @@ const fakeStore = {
 beforeEach(() => {
   fakeStore.getMessage.mockReset();
   fakeSock.signalRepository = undefined;
+  fakeSock.executeUSyncQuery.mockReset().mockResolvedValue(undefined);
   fakeSock.onWhatsApp.mockReset().mockImplementation((jid: string) => Promise.resolve([{ jid, exists: true }]));
   fakeSock.groupFetchAllParticipating.mockReset();
   const baileys = jest.requireMock<Record<string, jest.Mock>>('@whiskeysockets/baileys');
@@ -234,6 +282,16 @@ const newAdapter = (): BaileysAdapter =>
   });
 
 const noopCallbacks = (over: Partial<EngineEventCallbacks> = {}): EngineEventCallbacks => over;
+
+// A real 1x1 PNG, and a small SVG: the picture writes read the header of what they upload, so bytes that
+// are no image are refused before they reach the socket.
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+const SVG_BYTES = Buffer.from(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>',
+);
 
 /**
  * Every text send now carries send-options, because that is how the SSRF-safe preview generator
@@ -280,6 +338,22 @@ describe('BaileysAdapter lifecycle & status', () => {
     expect(rendered).toMatch(/^data:image\/png;base64,/);
     expect(adapter.getStatus()).toBe(EngineStatus.QR_READY);
     expect(adapter.getQRCode()).toBe(rendered);
+  });
+
+  it('blocks SVG decoding before the engine starts, whichever route reaches sharp first', async () => {
+    // Sticker conversion and the thumbnail of every outbound image share one process-wide decoder, so the
+    // block cannot wait for the first sticker, and it has to be in place before the socket exists.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const makeWASocket = jest.requireMock('@whiskeysockets/baileys').default as jest.Mock;
+    const block = jest.spyOn(messagingModule, 'blockSvgDecoding').mockResolvedValue(undefined);
+    try {
+      await newAdapter().initialize(noopCallbacks({}));
+      expect(block).toHaveBeenCalledTimes(1);
+      expect(makeWASocket).toHaveBeenCalled();
+      expect(block.mock.invocationCallOrder[0]).toBeLessThan(makeWASocket.mock.invocationCallOrder[0]);
+    } finally {
+      block.mockRestore();
+    }
   });
 
   it('captures phone/pushName and fires onReady on connection open', async () => {
@@ -1866,6 +1940,57 @@ describe('BaileysAdapter messaging', () => {
     await expect(adapter.sendTextMessage('628111@s.whatsapp.net', 'hello')).rejects.toBe(failure);
   });
 
+  // sendMessage awaits IQs (group roster, devices, sessions) before it relays the message, and WhatsApp
+  // answers a throttled one with a numeric code on the Boom. Every other path maps these to a retryable 503.
+  it.each([
+    [429, EngineThrottledError],
+    [408, EngineTransportError],
+  ])('a WhatsApp %s answer to a query the send awaits is a retryable 503, not a bare 500', async (code, expected) => {
+    const adapter = await readyAdapter();
+    fakeSock.sendMessage.mockRejectedValue(new Boom('rate-overlimit', { data: code }));
+    const rejection = adapter.sendTextMessage('628111@s.whatsapp.net', 'hello');
+    await expect(rejection).rejects.toBeInstanceOf(expected);
+    await expect(rejection).rejects.toBeInstanceOf(EngineTransportError);
+  });
+
+  // The throttle is WhatsApp refusing this account's traffic, which is what the breaker watches for; the send
+  // itself provably went nowhere, so its admission is given back.
+  it('a throttled send is known to have sent nothing and still feeds the send breaker', async () => {
+    const adapter = await readyAdapter();
+    fakeSock.sendMessage.mockRejectedValue(new Boom('rate-overlimit', { data: 429 }));
+    const error: unknown = await adapter.sendTextMessage('628111@s.whatsapp.net', 'hello').catch((e: unknown) => e);
+    expect(sentNothing(error)).toBe(true);
+    expect(countsTowardSendBreaker(error)).toBe(true);
+  });
+
+  // A query that timed out may have been answered after the caller gave up, so nothing is claimed about the
+  // send: its admission stays held, and the timeout is a transport fault the breaker leaves to reconnects.
+  it('a send whose awaited query timed out is not known to have sent nothing and stays off the breaker', async () => {
+    const adapter = await readyAdapter();
+    fakeSock.sendMessage.mockRejectedValue(new Boom('timed out', { data: 408 }));
+    const error: unknown = await adapter.sendTextMessage('628111@s.whatsapp.net', 'hello').catch((e: unknown) => e);
+    expect(sentNothing(error)).toBe(false);
+    expect(countsTowardSendBreaker(error)).toBe(false);
+  });
+
+  // The library's own write timeout (promiseTimeout) carries statusCode 408 and an object data, not a numeric
+  // WhatsApp code. Its frame may already be on the socket, so it must not become a retryable 503.
+  it('leaves the local socket-write timeout of a send unmapped', async () => {
+    const adapter = await readyAdapter();
+    const timedOut = new Boom('Timed Out', { statusCode: 408, data: { stack: 'Error\n    at x' } });
+    fakeSock.sendMessage.mockRejectedValue(timedOut);
+    const rejection = adapter.sendTextMessage('628111@s.whatsapp.net', 'hello');
+    await expect(rejection).rejects.toBe(timedOut);
+    await expect(rejection).rejects.not.toBeInstanceOf(EngineTransportError);
+  });
+
+  it('leaves any other WhatsApp refusal code to propagate untouched', async () => {
+    const adapter = await readyAdapter();
+    const refusal = new Boom('forbidden', { data: 403 });
+    fakeSock.sendMessage.mockRejectedValue(refusal);
+    await expect(adapter.sendTextMessage('628111@s.whatsapp.net', 'hello')).rejects.toBe(refusal);
+  });
+
   /** An adapter for a session started behind a proxy, which every fetch it makes must leave through. */
   const proxiedAdapter = async (): Promise<BaileysAdapter> => {
     const adapter = new BaileysAdapter({
@@ -1974,7 +2099,7 @@ describe('BaileysAdapter messaging', () => {
     await adapter.sendTextMessage('628111@c.us', 'hello');
 
     // The device suffix (:3) is stripped — that is the key the lid->phone lookup reads.
-    expect(spy).toHaveBeenCalledWith([{ lid: '484848@lid', pn: '628111@s.whatsapp.net' }]);
+    expect(spy).toHaveBeenCalledWith([{ lid: '484848@lid', pn: '628111@s.whatsapp.net' }], false);
   });
 
   it('sendTextMessage uses the canonical phone jid when no LID mapping is known', async () => {
@@ -1987,6 +2112,25 @@ describe('BaileysAdapter messaging', () => {
       { text: 'hello', linkPreview: null },
       safeSendOptions(),
     );
+  });
+
+  // Brazil, Mexico and Argentina numbers exist on WhatsApp under another digit string than the one typed (the
+  // ninth digit). The number check reports the id WhatsApp knows, and the send goes there, not to the typed one.
+  it.each([
+    ['the phone jid', null, '551187654321@s.whatsapp.net'],
+    ['the lid known for it', '484848@lid', '484848@lid'],
+  ])('sendTextMessage addresses a first-contact send to the id the number check reported: %s', async (_, lid, to) => {
+    fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
+    fakeSock.onWhatsApp.mockResolvedValue([{ jid: '551187654321@s.whatsapp.net', exists: true }]);
+    const getLIDForPN = jest.fn((pn: string) => Promise.resolve(pn === '551187654321@s.whatsapp.net' ? lid : null));
+    fakeSock.signalRepository = { lidMapping: { getLIDForPN } };
+    const adapter = await readyAdapter();
+
+    await adapter.sendTextMessage('5511987654321@c.us', 'hello');
+
+    expect(fakeSock.onWhatsApp).toHaveBeenCalledWith('5511987654321@s.whatsapp.net');
+    expect(getLIDForPN).toHaveBeenLastCalledWith('551187654321@s.whatsapp.net');
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith(to, { text: 'hello', linkPreview: null }, safeSendOptions());
   });
 
   it('sendTextMessage honors the chat disappearing timer when one is cached (#473)', async () => {
@@ -2455,7 +2599,7 @@ describe('BaileysAdapter inbound fan-out', () => {
     expect(msg.chatId).toBe('628111@c.us');
   });
 
-  it('resolves an @lid sender to <phone>@c.us using a history-sync lid->pn mapping', async () => {
+  it('retains the raw LID sender after a history phone mapping', async () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
@@ -2474,11 +2618,11 @@ describe('BaileysAdapter inbound fan-out', () => {
     await new Promise(r => setImmediate(r));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const msg = onMessage.mock.calls[0][0] as { from: string; isLidSender?: boolean };
-    expect(msg.from).toBe('628111@c.us'); // lid resolved to phone, neutral dialect
+    expect(msg.from).toBe('111@lid'); // display resolution does not change chat identity
     expect(msg.isLidSender).toBe(true); // still flagged: the raw sender was a lid
   });
 
-  it('resolves an @lid sender via the lid/pn pair carried on the inbound message key (#362)', async () => {
+  it('retains a sender LID while recording its explicit key phone pairing', async () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
@@ -2502,7 +2646,7 @@ describe('BaileysAdapter inbound fan-out', () => {
     await new Promise(r => setImmediate(r));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const msg = onMessage.mock.calls[0][0] as { from: string; isLidSender?: boolean };
-    expect(msg.from).toBe('628111@c.us'); // resolved from the key's remoteJidAlt, neutral dialect
+    expect(msg.from).toBe('111@lid'); // the reported pair bridges the phone through the shared directory
     expect(msg.isLidSender).toBe(true);
   });
 
@@ -2742,6 +2886,8 @@ describe('BaileysAdapter inbound fan-out', () => {
           ? { id: 'TARGET', revokedId: 'TARGET', body: '' }
           : { messageId: 'TARGET', body: 'updated' }),
       }),
+      // A revoke also says who made it: here the account's own API delete, echoed.
+      ...(operation === 'delete' ? [{ fromMe: true }] : []),
     );
     expect(operation === 'delete' ? onMessageEdited : onMessageRevoked).not.toHaveBeenCalled();
     expect(onMessageCreate).not.toHaveBeenCalled();
@@ -2915,6 +3061,25 @@ describe('BaileysAdapter inbound fan-out', () => {
     ]);
     expect(onMessageAck).toHaveBeenCalledWith('OUT2', 'sent', '6281111111111@c.us');
     expect(onMessageAck).toHaveBeenCalledWith('OUT3', 'delivered', '120363000000000000@g.us');
+  });
+
+  it('emits onMessageReceipt from message-receipt.update for a group message the account sent', async () => {
+    const onMessageReceipt = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessageReceipt });
+    fakeSock.fire('message-receipt.update', [
+      {
+        key: { id: 'OUT1', remoteJid: '120363000000000001@g.us', fromMe: true },
+        receipt: { userJid: '628222@s.whatsapp.net', readTimestamp: 1700000000 },
+      },
+    ]);
+    expect(onMessageReceipt).toHaveBeenCalledWith({
+      messageId: 'OUT1',
+      chatId: '120363000000000001@g.us',
+      participant: '628222@c.us',
+      status: 'read',
+      timestamp: 1700000000,
+    });
   });
 
   it('inbound image: downloads media and exposes base64 + caption as body', async () => {
@@ -3609,7 +3774,9 @@ describe('BaileysAdapter inbound fan-out', () => {
     await new Promise(r => setImmediate(r));
 
     expect(firstEditedMessage(onMessageEdited)).toMatchObject({ messageId: 'EDITED_ID', body: 'fixed' });
-    expect(onMessageRevoked).toHaveBeenCalledWith(expect.objectContaining({ id: 'REVOKED_ID' }));
+    expect(onMessageRevoked).toHaveBeenCalledWith(expect.objectContaining({ id: 'REVOKED_ID' }), {
+      fromMe: false,
+    });
     expect(onMessageReaction).toHaveBeenCalledWith(
       expect.objectContaining({ messageId: 'REACTED_ID', reaction: 'ok' }),
     );
@@ -3660,8 +3827,12 @@ describe('BaileysAdapter inbound fan-out', () => {
     expect(firstEditedMessage(onMessageEdited)).toMatchObject({ messageId: 'E1', chatId: '628222@c.us' });
     expect(onMessageRevoked).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'R1', chatId: '628222@c.us', from: '628222@c.us' }),
+      expect.anything(),
     );
-    expect(onMessageRevoked).toHaveBeenCalledWith(expect.objectContaining({ id: 'R2', chatId: LIST, to: LIST }));
+    expect(onMessageRevoked).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'R2', chatId: LIST, to: LIST }),
+      expect.anything(),
+    );
     expect(onMessageReaction).toHaveBeenCalledWith(
       expect.objectContaining({ messageId: 'X1', chatId: '628222@c.us', senderId: '628222@c.us' }),
     );
@@ -4045,7 +4216,7 @@ describe('BaileysAdapter inbound fan-out', () => {
     expect(onMessage).toHaveBeenCalledTimes(1);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const msg = onMessage.mock.calls[0][0] as { author?: string; body: string };
-    expect(msg.author).toBe('628111@c.us');
+    expect(msg.author).toBe('111@lid');
     expect(msg.body).toBe('first real message');
   });
 
@@ -4169,10 +4340,31 @@ describe('BaileysAdapter media sends', () => {
   it('sendAudioMessage sets ptt:false', async () => {
     const adapter = await ready();
     await adapter.sendAudioMessage('628111@s.whatsapp.net', { mimetype: 'audio/mp4', data: Buffer.from([1]) });
+    // seconds is always present: an undefined one is what makes Baileys read the file itself.
     expect(fakeSock.sendMessage).toHaveBeenCalledWith('628111@s.whatsapp.net', {
       audio: Buffer.from([1]),
       mimetype: 'audio/mp4',
       ptt: false,
+      seconds: 0,
+    });
+  });
+
+  it('sendAudioMessage hands Baileys the duration and waveform read in the child, so it reads nothing itself', async () => {
+    const waveform = Uint8Array.from({ length: 64 }, (_, bar) => bar);
+    (describeAudio as jest.Mock).mockResolvedValueOnce({ seconds: 7, waveform });
+    const adapter = await ready();
+    await adapter.sendAudioMessage('628111@s.whatsapp.net', {
+      mimetype: 'audio/ogg; codecs=opus',
+      data: Buffer.from([1]),
+      ptt: true,
+    });
+    expect(describeAudio).toHaveBeenLastCalledWith(Buffer.from([1]), true);
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith('628111@s.whatsapp.net', {
+      audio: Buffer.from([1]),
+      mimetype: 'audio/ogg; codecs=opus',
+      ptt: true,
+      seconds: 7,
+      waveform,
     });
   });
 
@@ -4206,6 +4398,7 @@ describe('BaileysAdapter media sends', () => {
       audio: Buffer.from([1]),
       mimetype: 'audio/ogg; codecs=opus',
       ptt: true,
+      seconds: 0,
     });
   });
 
@@ -4366,6 +4559,110 @@ describe('BaileysAdapter store-backed ops', () => {
     // below, so a spec cannot pass on either one.
     messageTimestamp: '1700000000',
   };
+
+  it('confirms a phone-addressed stored LID through a fresh LID query before mutating it', async () => {
+    const adapter = await ready();
+    fakeStore.getMessage.mockResolvedValue({
+      key: { id: 'TARGET', remoteJid: '111@lid', fromMe: true },
+      message: { conversation: 'mine' },
+    });
+    fakeSock.executeUSyncQuery.mockResolvedValueOnce({ list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] });
+    await expect(adapter.starMessage('628111@c.us', 'TARGET', true)).resolves.toBeUndefined();
+    expect(fakeSock.executeUSyncQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: 'background',
+        protocols: ['lid'],
+        users: [expect.objectContaining({ id: '628111@s.whatsapp.net' })],
+      }),
+    );
+  });
+
+  it('confirms a LID request against an older phone-keyed message through the same fresh query', async () => {
+    const adapter = await ready();
+    fakeStore.getMessage.mockResolvedValue({
+      key: { id: 'TARGET', remoteJid: '628111@s.whatsapp.net', fromMe: true },
+      message: { conversation: 'mine' },
+    });
+    fakeSock.executeUSyncQuery.mockResolvedValueOnce({ list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] });
+    await expect(adapter.starMessage('111@lid', 'TARGET', true)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    { list: [{ id: '628222@s.whatsapp.net', lid: '111@lid' }] },
+    { list: [{ id: '628111@s.whatsapp.net', lid: '222@lid' }] },
+    { list: [{ id: '628111@s.whatsapp.net', lid: '111@g.us' }] },
+    { list: [{ id: '628111@lid', lid: '111@lid' }] },
+    { list: [{ id: '628111@s.whatsapp.net' }] },
+    {
+      list: [
+        { id: '628111@s.whatsapp.net', lid: '111@lid' },
+        { id: '628111@s.whatsapp.net', lid: '222@lid' },
+      ],
+    },
+    { list: [] },
+    undefined,
+  ])('refuses a stored LID whose query result does not uniquely confirm the addressed phone (%j)', async result => {
+    const adapter = await ready();
+    fakeStore.getMessage.mockResolvedValue({
+      key: { id: 'TARGET', remoteJid: '111@lid', fromMe: true },
+      message: { conversation: 'mine' },
+    });
+    fakeSock.executeUSyncQuery.mockResolvedValueOnce(result);
+    await expect(adapter.starMessage('628111@c.us', 'TARGET', true)).rejects.toBeInstanceOf(MessageNotFoundError);
+    expect(fakeSock.chatModify).not.toHaveBeenCalled();
+  });
+
+  it('bounds a stored LID identity query that never answers', async () => {
+    const adapter = await ready();
+    fakeStore.getMessage.mockResolvedValue({
+      key: { id: 'TARGET', remoteJid: '111@lid', fromMe: true },
+      message: { conversation: 'mine' },
+    });
+    fakeSock.executeUSyncQuery.mockImplementationOnce(() => new Promise(() => undefined));
+    jest.useFakeTimers();
+    try {
+      let failure: unknown;
+      void adapter.starMessage('628111@c.us', 'TARGET', true).catch(error => {
+        failure = error;
+      });
+      await jest.advanceTimersByTimeAsync(30_000);
+      expect(failure).toBeInstanceOf(EngineTransportError);
+      expect(fakeSock.chatModify).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('drops a matching identity answer from a retired socket', async () => {
+    const adapter = await ready();
+    const mappings = jest.spyOn(
+      (adapter as unknown as { sessionStore: { addLidMappings: () => void } }).sessionStore,
+      'addLidMappings',
+    );
+    fakeStore.getMessage.mockResolvedValue({
+      key: { id: 'TARGET', remoteJid: '111@lid', fromMe: true },
+      message: { conversation: 'mine' },
+    });
+    let reply!: (value: unknown) => void;
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => {
+      started = resolve;
+    });
+    fakeSock.executeUSyncQuery.mockImplementationOnce(() => {
+      started();
+      return new Promise(resolve => {
+        reply = resolve;
+      });
+    });
+    const pending = adapter.starMessage('628111@c.us', 'TARGET', true);
+    const rejected = expect(pending).rejects.toBeInstanceOf(EngineNotReadyError);
+    await entered;
+    await adapter.disconnect();
+    reply({ list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] });
+    await rejected;
+    expect(fakeSock.chatModify).not.toHaveBeenCalled();
+    expect(mappings).not.toHaveBeenCalled();
+  });
 
   it('replyToMessage quotes the stored message', async () => {
     fakeStore.getMessage.mockResolvedValue(stored);
@@ -5070,21 +5367,26 @@ describe('BaileysAdapter store-backed ops', () => {
       );
     afterEach(() => {
       fakeSock.signalRepository = undefined;
+      fakeSock.executeUSyncQuery.mockResolvedValue(undefined);
     });
 
     it.each([
       ['an unmapped @c.us id to a phone-keyed chat', '628111@c.us', '628111@s.whatsapp.net', null],
       ['a phone id to a phone-keyed chat whose lid is known', '628111@c.us', '628111@s.whatsapp.net', '484848@lid'],
       ['a phone id to a lid-keyed chat', '628111@s.whatsapp.net', '484848@lid', '484848@lid'],
-    ])('%s still becomes the chat preview and sort time', async (_label, sendTo, chatKey, lid) => {
+    ])('%s keeps the wire identity for its preview and operations', async (_label, sendTo, chatKey, lid) => {
       fakeSock.signalRepository = { lidMapping: { getLIDForPN: jest.fn().mockResolvedValue(lid) } };
       echoSend();
+      if (lid) fakeSock.executeUSyncQuery.mockResolvedValue({ list: [{ id: '628111@s.whatsapp.net', lid }] });
       const adapter = await ready();
       fakeSock.fire('chats.upsert', [{ id: chatKey, conversationTimestamp: 1700000000 }]);
       await adapter.sendTextMessage(sendTo, 'on its way');
-      expect(await adapter.getChats()).toEqual([
-        expect.objectContaining({ id: '628111@c.us', timestamp: 1700000100, lastMessage: 'on its way' }),
-      ]);
+      const identity = lid ?? '628111@c.us';
+      expect(await adapter.getChats()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: identity, timestamp: 1700000100, lastMessage: 'on its way' }),
+        ]),
+      );
 
       fakeStore.getMessage.mockResolvedValue({
         key: { id: 'OUT', remoteJid: lid ?? sendTo, fromMe: true },
@@ -5092,9 +5394,9 @@ describe('BaileysAdapter store-backed ops', () => {
         messageTimestamp: 1700000100,
       });
       await adapter.editMessage('628111@c.us', 'OUT', 'arriving tomorrow');
-      expect((await adapter.getChats())[0]?.lastMessage).toBe('arriving tomorrow');
+      expect((await adapter.getChats()).find(chat => chat.id === identity)?.lastMessage).toBe('arriving tomorrow');
       await adapter.deleteMessage('628111@c.us', 'OUT', true);
-      expect((await adapter.getChats())[0]?.lastMessage).toBe('');
+      expect((await adapter.getChats()).find(chat => chat.id === identity)?.lastMessage).toBe('');
     });
   });
 
@@ -5202,11 +5504,54 @@ describe('BaileysAdapter store-backed ops', () => {
         rmSpy.mockRestore();
       }
     });
+
+    // The rows that survive a failed clear resurface under the next account to link the session, so the
+    // failure is non-fatal for the unlink but must not pass without a trace.
+    const warnOf = (adapter: BaileysAdapter) =>
+      jest
+        .spyOn((adapter as unknown as { logger: { warn: (m: string, ctx?: unknown) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+    const clearFailure = (what: string) => [
+      `Failed to clear the stored ${what} of an unlinked account`,
+      expect.objectContaining({ sessionId: 'sess-1', error: 'SQLITE_BUSY' }) as unknown,
+    ];
+
+    it('logs a failed clear on logout while the unlink still completes', async () => {
+      const adapter = await linked();
+      fakeStore.clearSession.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+      const warn = warnOf(adapter);
+
+      await expect(adapter.logout()).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalledWith(...clearFailure('messages'));
+      expect(warn).toHaveBeenCalledWith(...clearFailure('chat states'));
+    });
+
+    it('logs a failed clear when WhatsApp unlinks the device while the unlink still completes', async () => {
+      const rmSpy = jest.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
+      try {
+        const onDisconnected = jest.fn();
+        const adapter = await linked(onDisconnected);
+        fakeStore.clearSession.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+        const warn = warnOf(adapter);
+        fakeSock.fire('connection.update', {
+          connection: 'close',
+          lastDisconnect: { error: { output: { statusCode: 401 } } },
+        });
+        await new Promise(r => setImmediate(r));
+
+        expect(warn).toHaveBeenCalledWith(...clearFailure('messages'));
+        expect(warn).toHaveBeenCalledWith(...clearFailure('chat states'));
+        expect(onDisconnected).toHaveBeenCalledWith('logged out');
+      } finally {
+        rmSpy.mockRestore();
+      }
+    });
   });
 });
 
 describe('BaileysAdapter group management', () => {
-  const PNG_INPUT = { mimetype: 'image/png', data: 'QUJD' };
+  const PNG_INPUT = { mimetype: 'image/png', data: PNG_BYTES.toString('base64') };
   const META = {
     id: '123-456@g.us',
     subject: 'G',
@@ -5281,7 +5626,7 @@ describe('BaileysAdapter group management', () => {
     await expect(adapter.getGroupInfo('123-456@g.us')).rejects.toThrow('unexpected');
   });
 
-  it('getGroupInfo canonicalizes participant + owner ids through the session store (lid -> phone)', async () => {
+  it('getGroupInfo keeps LID participant and owner identities separate from cached phones', async () => {
     const adapter = await ready();
     // History sync supplies the lid -> phone mapping; the adapter passes the store's canonicalizer in.
     fakeSock.fire('messaging-history.set', { lidPnMappings: [{ lid: '111@lid', pn: '628111@s.whatsapp.net' }] });
@@ -5296,8 +5641,8 @@ describe('BaileysAdapter group management', () => {
     });
     const info = await adapter.getGroupInfo('123-456@g.us');
     // Owner + the known admin fold to <phone>@c.us, so they share the dialect of canonicalized authors.
-    expect(info?.owner).toBe('628111@c.us');
-    expect(info?.participants[0]).toMatchObject({ id: '628111@c.us', number: '628111', isSuperAdmin: true });
+    expect(info?.owner).toBe('111@lid');
+    expect(info?.participants[0]).toMatchObject({ id: '111@lid', number: '111', isSuperAdmin: true });
     expect(info?.participants[1]).toMatchObject({ id: '222@lid', number: '222' }); // unresolved kept raw
   });
 
@@ -5754,8 +6099,18 @@ describe('BaileysAdapter group management', () => {
     // fakeSock.user.id is '628999:1@s.whatsapp.net' (see beforeEach) — the own JID the adapter
     // normalizes the same way as everywhere else.
     const adapter = await ready();
-    await adapter.setProfilePicture({ mimetype: 'image/png', data: Buffer.from('IMG').toString('base64') });
-    expect(fakeSock.updateProfilePicture).toHaveBeenCalledWith('628999@s.whatsapp.net', Buffer.from('IMG'));
+    await adapter.setProfilePicture({ mimetype: 'image/png', data: PNG_BYTES.toString('base64') });
+    expect(fakeSock.updateProfilePicture).toHaveBeenCalledWith('628999@s.whatsapp.net', PNG_BYTES);
+  });
+
+  // SVG decoding is blocked process-wide (see blockSvgDecoding), so the library's own conversion rejects
+  // an SVG with an error nothing maps, which answered 500 for a file the client chose.
+  it('setProfilePicture refuses an SVG with a 400 and uploads nothing', async () => {
+    const adapter = await ready();
+    await expect(
+      adapter.setProfilePicture({ mimetype: 'image/svg+xml', data: SVG_BYTES.toString('base64') }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(fakeSock.updateProfilePicture).not.toHaveBeenCalled();
   });
 
   it('setProfilePicture throws when the own JID is not known', async () => {
@@ -5868,7 +6223,7 @@ describe('BaileysAdapter group events (group-participants.update / groups.update
     expect(firstEvent(onGroupEvent).participantIds).toEqual(['628111@c.us']);
   });
 
-  it('resolves a lid-only participant through the learned lid->pn mapping, else keeps the lid', async () => {
+  it('retains a lid-only participant identity after learning a display phone', async () => {
     const { onGroupEvent } = await readyWithGroupEvents();
 
     fakeSock.fire('group-participants.update', {
@@ -5886,7 +6241,7 @@ describe('BaileysAdapter group events (group-participants.update / groups.update
       participants: [{ id: '111@lid' }],
     });
     const calls = onGroupEvent.mock.calls as Array<[GroupEvent]>;
-    expect(calls[1][0].participantIds).toEqual(['628111@c.us']);
+    expect(calls[1][0].participantIds).toEqual(['111@lid']);
   });
 
   it('prefers authorPn over a lid author for the neutral actorId', async () => {
@@ -6083,7 +6438,7 @@ describe('BaileysAdapter group events (group-participants.update / groups.update
     expect(firstEvent(onGroupEvent).groupId).toBe('789-000@g.us');
   });
 
-  it('skips a self-created group addressed by lid when the creds carry no own lid', async () => {
+  it('retains a lid actor when the credentials cannot identify it as this account', async () => {
     // Without `user.lid` every lid comparison answered false, so the group this session had just
     // created was reported as a join of itself. The store's own lid mapping settles it instead.
     fakeSock.user = { id: '628999:1@s.whatsapp.net', name: 'Me' }; // no lid on the creds
@@ -6093,7 +6448,7 @@ describe('BaileysAdapter group events (group-participants.update / groups.update
 
     fakeSock.fire('groups.upsert', [createdGroup({ author: '999000@lid', owner: '999000@lid', authorPn: undefined })]);
 
-    expect(onGroupEvent).not.toHaveBeenCalled();
+    expect(onGroupEvent).toHaveBeenCalledWith(expect.objectContaining({ actorId: '999000@lid' }));
   });
 
   it('reports a groups.upsert entry the session authored for a group another account owns', async () => {
@@ -6622,12 +6977,64 @@ describe('BaileysAdapter contact + chat reads', () => {
     });
   });
 
+  it.each(['add', 'remove'])('does not %s a label if the connection changes after address preparation', async mode => {
+    const adapter = await ready();
+    const original = fakeSock;
+    const replacement = { addChatLabel: jest.fn(), removeChatLabel: jest.fn() };
+    const contacts = (adapter as unknown as { contacts: { confirmedChatJid: (chatId: string) => Promise<string> } })
+      .contacts;
+    const prepare = contacts.confirmedChatJid.bind(contacts);
+    const lookup = jest.spyOn(contacts, 'confirmedChatJid').mockImplementation(async chatId => {
+      const jid = await prepare(chatId);
+      (adapter as unknown as { sock: unknown }).sock = replacement;
+      return jid;
+    });
+    try {
+      const pending =
+        mode === 'add'
+          ? adapter.addLabelToChat('628111@c.us', 'label')
+          : adapter.removeLabelFromChat('628111@c.us', 'label');
+      await expect(pending).rejects.toBeInstanceOf(EngineNotReadyError);
+      for (const socket of [original, replacement]) {
+        expect(socket.addChatLabel).not.toHaveBeenCalled();
+        expect(socket.removeChatLabel).not.toHaveBeenCalled();
+      }
+    } finally {
+      lookup.mockRestore();
+      (adapter as unknown as { sock: unknown }).sock = original;
+      await adapter.destroy();
+    }
+  });
+
+  it('drops a contact identity answer from a retired socket', async () => {
+    const adapter = await ready();
+    fakeSock.fire('contacts.upsert', [{ id: '111@lid', phoneNumber: '628111@s.whatsapp.net' }]);
+    let reply!: (value: unknown) => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => {
+      entered = resolve;
+    });
+    fakeSock.executeUSyncQuery.mockImplementationOnce(() => {
+      entered();
+      return new Promise(resolve => {
+        reply = resolve;
+      });
+    });
+    const pending = adapter.getContactById('628111@c.us');
+    const rejected = expect(pending).rejects.toBeInstanceOf(EngineNotReadyError);
+    await started;
+    await adapter.disconnect();
+    reply({ list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] });
+    await rejected;
+  });
+
   describe('resolveContactPhone for a lid this session does not hold in memory', () => {
     const makeLidStore = () => ({
       getCached: jest.fn((): string | null | undefined => undefined),
       resolveLid: jest.fn(() => null),
       lidsForPhone: jest.fn((): string[] => []),
-      remember: jest.fn(() => Promise.resolve()),
+      remember: jest.fn(() => Promise.resolve(true)),
+      rememberIfUnknown: jest.fn(() => Promise.resolve(true)),
       findPhoneForLid: jest.fn((): Promise<string | null> => Promise.resolve(null)),
     });
     const readyWith = async (lidMappingStore: ReturnType<typeof makeLidStore>): Promise<BaileysAdapter> => {
@@ -6646,6 +7053,52 @@ describe('BaileysAdapter contact + chat reads', () => {
       fakeSock.signalRepository = undefined;
     });
 
+    it.each(['persisted-add', 'persisted-remove', 'fresh-add', 'fresh-remove'])(
+      'does not send a label action across replacement during %s preparation',
+      async mode => {
+        const lidStore = makeLidStore();
+        let release!: () => void;
+        let entered!: () => void;
+        const started = new Promise<void>(resolve => {
+          entered = resolve;
+        });
+        const gate = new Promise<void>(resolve => {
+          release = resolve;
+        });
+        if (mode.startsWith('persisted'))
+          lidStore.findPhoneForLid.mockImplementation(async () => {
+            entered();
+            await gate;
+            return '628111';
+          });
+        const adapter = await readyWith(lidStore);
+        const original = fakeSock;
+        original.executeUSyncQuery.mockReset().mockImplementation(async () => {
+          entered();
+          await gate;
+          return { list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] };
+        });
+        fakeSock.fire('contacts.upsert', [{ id: '111@lid', phoneNumber: '628111@s.whatsapp.net' }]);
+        fakeSock.fire('chats.upsert', [{ id: '111@lid' }]);
+        const replacement = { addChatLabel: jest.fn(), removeChatLabel: jest.fn() };
+        const pending = (
+          mode.endsWith('add')
+            ? adapter.addLabelToChat('628111@c.us', 'label')
+            : adapter.removeLabelFromChat('628111@c.us', 'label')
+        ).catch((error: unknown) => error);
+        await started;
+        (adapter as unknown as { sock: unknown }).sock = replacement;
+        release();
+        expect(await pending).toBeInstanceOf(EngineNotReadyError);
+        for (const socket of [original, replacement]) {
+          expect(socket.addChatLabel).not.toHaveBeenCalled();
+          expect(socket.removeChatLabel).not.toHaveBeenCalled();
+        }
+        (adapter as unknown as { sock: unknown }).sock = original;
+        await adapter.destroy();
+      },
+    );
+
     it('answers from the persisted table when the cache no longer holds the mapping', async () => {
       const lidStore = makeLidStore();
       lidStore.findPhoneForLid.mockResolvedValue('628111');
@@ -6662,7 +7115,8 @@ describe('BaileysAdapter contact + chat reads', () => {
       const adapter = await readyWith(lidStore);
       expect(await adapter.resolveContactPhone('111@lid')).toBe('628222');
       expect(getPNForLID).toHaveBeenCalledWith('111@lid');
-      expect(lidStore.remember).toHaveBeenCalledWith('111', '628222', 'sess-1');
+      expect(lidStore.rememberIfUnknown).toHaveBeenCalledWith('111', '628222', 'sess-1');
+      expect(lidStore.remember).not.toHaveBeenCalled();
     });
 
     it('rejects instead of answering null when nothing maps the lid, so no null is stored', async () => {
@@ -6682,6 +7136,436 @@ describe('BaileysAdapter contact + chat reads', () => {
       expect(await adapter.resolveContactPhone('120363@g.us')).toBeNull();
       expect(lidStore.findPhoneForLid).not.toHaveBeenCalled();
     });
+
+    it.each(['history', 'contact', 'signal'])(
+      'keeps a newer shared phone when a sender lookup reads an earlier %s mapping',
+      async source => {
+        const pg = process.env.DATABASE_TYPE === 'postgres';
+        const server = {
+          type: 'postgres' as const,
+          host: process.env.DATABASE_HOST || '127.0.0.1',
+          port: Number(process.env.DATABASE_PORT || 5432),
+          username: process.env.DATABASE_USERNAME || 'openwa',
+          password: process.env.DATABASE_PASSWORD || 'openwa',
+          database: process.env.DATABASE_NAME || 'openwa',
+        };
+        const schema = `lid_sender_${randomUUID().replace(/-/g, '')}`;
+        const admin = pg ? await new DataSource(server).initialize() : undefined;
+        if (admin) await admin.query(`CREATE SCHEMA "${schema}"`);
+        const entities = [LidMapping, Session, Message];
+        const ds = await new DataSource(
+          pg
+            ? { ...server, schema, extra: { options: `-c search_path=${schema},public` }, entities, synchronize: true }
+            : { type: 'better-sqlite3', database: ':memory:', entities, synchronize: true },
+        ).initialize();
+        const [s1, s2] = ['00000001-0000-4000-8000-000000000000', '00000002-0000-4000-8000-000000000000'];
+        await ds.getRepository(Session).insert([s1, s2].map(id => ({ id, name: id, phone: '6290000000' })));
+        const repo = ds.getRepository(LidMapping);
+        const store = new LidMappingStoreService(repo);
+        const peer = new LidMappingStoreService(repo);
+        await store.onModuleInit();
+        await peer.onModuleInit();
+        jest.spyOn((store as unknown as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => {});
+        const pending = new Set<Promise<boolean>>();
+        for (const method of ['remember', 'rememberIfUnknown'] as const) {
+          const real = store[method].bind(store);
+          jest.spyOn(store, method).mockImplementation((...args: Parameters<typeof store.remember>) => {
+            const promise = real(...(args as [string, string, string]));
+            pending.add(promise);
+            void promise.finally(() => pending.delete(promise));
+            return promise;
+          });
+        }
+        const settle = async () => {
+          for (let i = 0; i < 5; i++) {
+            await new Promise(resolve => setImmediate(resolve));
+            await Promise.allSettled([...pending]);
+          }
+        };
+        const adapter = new BaileysAdapter({
+          sessionId: s1,
+          dbSessionId: s1,
+          authDir: './data/baileys',
+          messageStore: fakeStore,
+          lidMappingStore: store,
+        });
+        try {
+          const projected = new Set<Promise<unknown>>();
+          const onMessage = jest.fn((message: IncomingMessage) => {
+            const receipt = projector?.handleInboundMessage(s1, adapter, message);
+            if (receipt) {
+              projected.add(receipt.settled);
+              void receipt.settled.finally(() => projected.delete(receipt.settled));
+            }
+            return receipt;
+          });
+          const library = jest.requireMock<{ getContentType: jest.Mock }>('@whiskeysockets/baileys');
+          library.getContentType.mockImplementation((message: Record<string, unknown> = {}) => Object.keys(message)[0]);
+          const edits = jest.fn((message: EditedMessage) => projector.applyMessageEditQueued(s1, message));
+          const acks = jest.fn((id: string, status: DeliveryStatus, chatId?: string) =>
+            projector.handleMessageAck(s1, adapter, id, status, chatId),
+          );
+          await adapter.initialize({
+            onMessage,
+            onMessageCreate: message => projector.handleOwnSendEcho(s1, adapter, message),
+            onHistoryMessages: messages => projector.persistHistoryMessages(s1, adapter, messages),
+            onMessageAck: acks,
+            onMessageEdited: edits,
+            onMessageRevoked: (message, actor) => projector.handleMessageRevoked(s1, adapter, message, actor),
+            onMessageReaction: event => projector.applyReactionQueued(s1, event),
+          });
+          fakeSock.fire('connection.update', { connection: 'open' });
+          const engines = new EngineRegistry();
+          engines.set(s1, adapter);
+          const resolver = new SessionLidResolver(engines, store);
+          const projector = new MessageProjector(
+            ds.getRepository(Message),
+            ds.getRepository(Session),
+            engines,
+            {
+              emitNewMessage: jest.fn(),
+              emitMessage: jest.fn(),
+              emitMessageEdited: jest.fn(),
+              emitMessageRevoked: jest.fn(),
+              emitMessageReaction: jest.fn(),
+              emitMessageSent: jest.fn(),
+              emitMessageAck: jest.fn(),
+            } as never,
+            { dispatch: jest.fn().mockResolvedValue(undefined) } as never,
+            {
+              execute: jest.fn((_event: string, data: Record<string, unknown>) =>
+                Promise.resolve({ continue: true, data }),
+              ),
+            } as never,
+            {} as never,
+            resolver,
+            undefined,
+            undefined,
+            undefined,
+            store,
+          );
+          const drainProjection = async () => {
+            await settle();
+            await Promise.allSettled([...projected]);
+            for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+          };
+          const rowEventually = async (
+            waMessageId: string,
+            check: (row: Message) => boolean = () => true,
+          ): Promise<Message> => {
+            const deadline = performance.now() + 5000;
+            for (;;) {
+              const row = await ds.getRepository(Message).findOneBy({ waMessageId });
+              if (row && check(row)) return row;
+              if (performance.now() >= deadline)
+                throw new Error(`Message ${waMessageId} did not reach its expected state`);
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+          };
+          let clock = 0;
+          (resolver as unknown as { now: () => number }).now = () => clock;
+          const failed = jest.spyOn(repo, 'upsert').mockRejectedValue(new Error('connection lost'));
+          const builder = repo.createQueryBuilder().insert().values({});
+          const execute = jest.spyOn(builder, 'execute').mockRejectedValue(new Error('connection lost'));
+          const failedSeed = jest.spyOn(repo, 'createQueryBuilder').mockReturnValue(builder as never);
+          if (source === 'history') {
+            fakeSock.fire('messaging-history.set', {
+              contacts: [],
+              chats: [],
+              messages: [],
+              lidPnMappings: [{ lid: '111@lid', pn: '628111@s.whatsapp.net' }],
+            });
+          } else if (source === 'contact') {
+            fakeSock.fire('contacts.upsert', [{ id: '111@lid', phoneNumber: '628111@s.whatsapp.net' }]);
+          } else {
+            fakeSock.signalRepository = {
+              lidMapping: { getLIDForPN: jest.fn(), getPNForLID: jest.fn().mockResolvedValue('628111@s.whatsapp.net') },
+            };
+          }
+          await expect(resolver.resolveSenderPhone(s1, '111@lid')).resolves.toBe('628111');
+          await settle();
+          expect(await repo.findOne({ where: { lid: '111' } })).toBeNull();
+          failed.mockRestore();
+          failedSeed.mockRestore();
+          execute.mockRestore();
+          await peer.remember('111', '628222', s2);
+          fakeSock.fire('contacts.update', [{ id: '111@lid', notify: 'New name' }]);
+          await settle();
+          expect(await repo.findOneByOrFail({ lid: '111' })).toMatchObject({ phone: '628222', isReported: true });
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'CACHE_ONLY', remoteJid: '111@lid', fromMe: false },
+                message: { conversation: 'private message' },
+                messageTimestamp: 1700000029,
+              },
+            ],
+          });
+          await settle();
+          fakeSock.fire('chats.upsert', [{ id: '111@lid' }, { id: '628111@s.whatsapp.net' }]);
+          const chats = await adapter.getChats();
+          const fence = new ChatScopeService(store);
+          expect(await fence.filter({ allowedChats: ['628111@c.us'] }, chats, chat => chat.id)).toEqual([
+            expect.objectContaining({ id: '628111@c.us', lastMessage: undefined }),
+          ]);
+          expect(await fence.filter({ allowedChats: ['111@lid'] }, chats, chat => chat.id)).toContainEqual(
+            expect.objectContaining({ id: '111@lid', lastMessage: 'private message' }),
+          );
+          const incoming = onMessage.mock.calls.find(([message]) => message.id === 'CACHE_ONLY')![0];
+          expect(incoming.chatId).toBe('111@lid');
+          expect(await new ChatScopeService(store).allows({ allowedChats: ['628111@c.us'] }, incoming.chatId)).toBe(
+            false,
+          );
+          await drainProjection();
+          const persisted = await ds.getRepository(Message).findOneByOrFail({ waMessageId: 'CACHE_ONLY' });
+          expect(persisted.chatId).toBe('111@lid');
+          expect(await fence.filter({ allowedChats: ['628111@c.us'] }, [persisted], message => message.chatId)).toEqual(
+            [],
+          );
+          expect(
+            await fence.filter({ allowedChats: ['111@lid'] }, [persisted], message => message.chatId),
+          ).toHaveLength(1);
+          fakeSock.fire('messages.update', [
+            { key: { id: 'CACHE_ONLY', remoteJid: '111@lid' }, update: { status: 3 } },
+          ]);
+          expect(acks).toHaveBeenCalledWith('CACHE_ONLY', 'delivered', '111@lid');
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'RAW_OWN', remoteJid: '111@lid', remoteJidAlt: '6290000000@s.whatsapp.net', fromMe: true },
+                message: { conversation: 'own content' },
+                messageTimestamp: 1700000029,
+              },
+            ],
+          });
+          fakeSock.fire('messaging-history.set', {
+            contacts: [],
+            chats: [],
+            messages: [
+              {
+                key: { id: 'RAW_HISTORY', remoteJid: '111@lid', fromMe: false },
+                message: { conversation: 'history content' },
+                messageTimestamp: 1700000029,
+              },
+            ],
+          });
+          await drainProjection();
+          for (const waMessageId of ['RAW_OWN', 'RAW_HISTORY']) {
+            const raw = await rowEventually(waMessageId);
+            expect(raw.chatId).toBe('111@lid');
+            expect(await fence.allows({ allowedChats: ['628111@c.us'] }, raw.chatId)).toBe(false);
+            expect(await fence.allows({ allowedChats: ['111@lid'] }, raw.chatId)).toBe(true);
+          }
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'RAW_REACTION', remoteJid: '111@lid', fromMe: false },
+                message: { reactionMessage: { key: { id: 'CACHE_ONLY' }, text: 'yes' } },
+                messageTimestamp: 1700000029,
+              },
+            ],
+          });
+          await drainProjection();
+          expect((await rowEventually('CACHE_ONLY', row => !!row.metadata?.reactions)).metadata?.reactions).toEqual({
+            '111@lid': 'yes',
+          });
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'RAW_REVOKE', remoteJid: '111@lid', fromMe: false },
+                message: { protocolMessage: { type: 0, key: { id: 'CACHE_ONLY' } } },
+                messageTimestamp: 1700000029,
+              },
+            ],
+          });
+          await drainProjection();
+          expect(await rowEventually('CACHE_ONLY', row => row.type === 'revoked')).toMatchObject({
+            chatId: '111@lid',
+            body: '',
+            type: 'revoked',
+          });
+          await ds.getRepository(Message).save({
+            sessionId: s1,
+            waMessageId: 'LEGACY',
+            chatId: '628111@c.us',
+            from: '628111@c.us',
+            to: 'me',
+            body: 'old body',
+            type: 'text',
+            direction: MessageDirection.INCOMING,
+            metadata: {},
+          });
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'LEGACY', remoteJid: '628111@s.whatsapp.net', fromMe: false },
+                message: { conversation: 'old body' },
+                messageTimestamp: 1700000028,
+              },
+            ],
+          });
+          await drainProjection();
+          const editLegacy = (id: string) =>
+            fakeSock.fire('messages.upsert', {
+              type: 'notify',
+              messages: [
+                {
+                  key: { id, remoteJid: '111@lid', fromMe: false },
+                  messageTimestamp: 1700000029,
+                  message: {
+                    protocolMessage: { type: 14, key: { id: 'LEGACY' }, editedMessage: { conversation: 'new body' } },
+                  },
+                },
+              ],
+            });
+          editLegacy('EDIT_FOREIGN');
+          await drainProjection();
+          expect((await ds.getRepository(Message).findOneByOrFail({ waMessageId: 'LEGACY' })).body).toBe('old body');
+          expect((await adapter.getChats()).find(chat => chat.id === '628111@c.us')?.lastMessage).toBe('old body');
+          if (source === 'contact') {
+            expect(await adapter.getContactById('628111@c.us')).toBeNull();
+            fakeSock.fire('contacts.update', [{ id: '111@lid', name: 'Private name' }]);
+            const contacts = await adapter.getContacts();
+            expect(await fence.filter({ allowedChats: ['628111@c.us'] }, contacts, contact => contact.id)).toEqual([]);
+            expect(await fence.filter({ allowedChats: ['111@lid'] }, contacts, contact => contact.id)).toContainEqual(
+              expect.objectContaining({ id: '111@lid', name: 'Private name' }),
+            );
+          }
+          clock += 300_000;
+
+          await expect(resolver.resolveSenderPhone(s1, '111@lid')).resolves.toBe('628111');
+          await settle();
+
+          expect(await repo.findOne({ where: { lid: '111' } })).toMatchObject({
+            phone: '628222',
+            sessionId: s2,
+            isReported: false,
+          });
+          for (const node of [store, peer]) {
+            const fence = new ChatScopeService(node);
+            const key = { allowedChats: ['628111@c.us'] };
+            expect(await fence.allows(key, '111@lid')).toBe(false);
+            expect((await fence.scopeForFilter(key))!.allowed.has('111@lid')).toBe(false);
+          }
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'CURRENT', remoteJid: '111@lid', remoteJidAlt: '628222@s.whatsapp.net', fromMe: false },
+                message: { conversation: 'hello' },
+                messageTimestamp: 1700000030,
+              },
+            ],
+          });
+          await settle();
+          expect(await repo.findOne({ where: { lid: '111' } })).toMatchObject({ phone: '628222', sessionId: s1 });
+          expect(await new ChatScopeService(store).allows({ allowedChats: ['628222@c.us'] }, '111@lid')).toBe(true);
+          const failedChange = jest.spyOn(repo, 'upsert').mockRejectedValueOnce(new Error('connection lost'));
+          const changed = {
+            key: { id: 'CHANGED', remoteJid: '111@lid', remoteJidAlt: '628333@s.whatsapp.net', fromMe: false },
+            message: { conversation: 'new number' },
+            messageTimestamp: 1700000031,
+          };
+          fakeSock.fire('messages.upsert', { type: 'notify', messages: [changed] });
+          await settle();
+          expect(await repo.findOne({ where: { lid: '111' } })).toMatchObject({ phone: '628222' });
+          failedChange.mockRestore();
+          const recovered = jest.spyOn(repo, 'upsert');
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'NO_ALT', remoteJid: '111@lid', fromMe: false },
+                message: { conversation: 'hello' },
+                messageTimestamp: 1700000032,
+              },
+            ],
+          });
+          clock += 300_000;
+          await expect(resolver.resolveSenderPhone(s1, '111@lid')).resolves.toBe('628333');
+          await settle();
+          expect(recovered).not.toHaveBeenCalled();
+          expect(await repo.findOne({ where: { lid: '111' } })).toMatchObject({ phone: '628222' });
+          const restoredReader = new LidMappingStoreService(repo);
+          await restoredReader.reload();
+          expect(await repo.findOneByOrFail({ lid: '111' })).toMatchObject({ phone: '628222', isReported: false });
+          for (const reader of [peer, restoredReader]) {
+            expect(await new ChatScopeService(reader).allows({ allowedChats: ['628222@c.us'] }, '111@lid')).toBe(false);
+            expect(await new ChatScopeService(reader).allows({ allowedChats: ['628333@c.us'] }, '111@lid')).toBe(false);
+          }
+
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [{ ...changed, key: { ...changed.key, id: 'RETRY' } }],
+          });
+          await settle();
+          expect(await repo.findOne({ where: { lid: '111' } })).toMatchObject({ phone: '628333', sessionId: s1 });
+          expect(await new ChatScopeService(store).allows({ allowedChats: ['628333@c.us'] }, '111@lid')).toBe(true);
+          await peer.remember('111', '628111', s2);
+          expect(await store.findPhoneForLid('111@lid')).toBe('628111');
+          editLegacy('EDIT_MATCHING');
+          await drainProjection();
+          expect((await rowEventually('LEGACY', row => row.body === 'new body')).body).toBe('new body');
+          expect(edits).toHaveBeenCalledTimes(2);
+          expect((await adapter.getChats()).find(chat => chat.id === '628111@c.us')?.lastMessage).toBe('new body');
+          const updates = fakeStore.update.mock.calls as Array<
+            [string, string, (message: unknown) => { message: { conversation: string } | null } | null]
+          >;
+          const update = updates.filter(([, id]) => id === 'LEGACY').at(-1)?.[2];
+          expect(
+            update?.({
+              key: { id: 'LEGACY', remoteJid: '628111@s.whatsapp.net', fromMe: false },
+              message: { conversation: 'old body' },
+            })?.message?.conversation,
+          ).toBe('new body');
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'LEGACY_REVOKE', remoteJid: '111@lid', fromMe: false },
+                message: { protocolMessage: { type: 0, key: { id: 'LEGACY' } } },
+                messageTimestamp: 1700000033,
+              },
+            ],
+          });
+          expect(await rowEventually('LEGACY', row => row.type === 'revoked')).toMatchObject({
+            chatId: '628111@c.us',
+            body: '',
+            type: 'revoked',
+          });
+          const removeBody = updates.filter(([, id]) => id === 'LEGACY').at(-1)?.[2];
+          expect(
+            removeBody?.({
+              key: { id: 'LEGACY', remoteJid: '628111@s.whatsapp.net', fromMe: false },
+              message: { conversation: 'new body' },
+            })?.message,
+          ).toBeNull();
+          await peer.rememberIfUnknown('111', '628222', s2);
+          expect(await store.findPhoneForLid('111@lid')).toBeNull();
+          fakeStore.getMessage.mockResolvedValueOnce({
+            key: { id: 'CONFIRMED', remoteJid: '111@lid', fromMe: true },
+            message: { conversation: 'own' },
+          });
+          fakeSock.executeUSyncQuery.mockResolvedValueOnce({ list: [{ id: '628111@s.whatsapp.net', lid: '111@lid' }] });
+          await adapter.starMessage('628111@c.us', 'CONFIRMED', true);
+          await settle();
+          expect(await repo.findOneByOrFail({ lid: '111' })).toMatchObject({ phone: '628111', isReported: true });
+          expect(await fence.allows({ allowedChats: ['628111@c.us'] }, '111@lid')).toBe(true);
+        } finally {
+          await adapter.destroy();
+          await ds.destroy();
+          if (admin) {
+            await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+            await admin.destroy();
+          }
+        }
+      },
+    );
   });
 
   describe('address book on a first link', () => {
@@ -6924,36 +7808,40 @@ describe('BaileysAdapter sendSeen + markUnread + deleteChat', () => {
     ['clearChatMessages', (a: BaileysAdapter) => a.clearChatMessages('628111@c.us')],
     ['archiveChat', (a: BaileysAdapter) => a.archiveChat('628111@c.us', true)],
     ['deleteChat', (a: BaileysAdapter) => a.deleteChat('628111@c.us')],
-  ])('%s addresses a lid-keyed chat by its lid when called with the listed @c.us id', async (_n, act) => {
-    const adapter = newAdapter();
-    await adapter.initialize({});
-    fakeSock.fire('connection.update', { connection: 'open' });
-    fakeSock.fire('chats.upsert', [{ id: '484848@lid' }]);
-    fakeSock.fire('messages.upsert', {
-      type: 'notify',
-      messages: [
-        {
-          key: { remoteJid: '484848@lid', remoteJidAlt: '628111@s.whatsapp.net', fromMe: false, id: 'M1' },
-          message: { conversation: 'hi' },
-          messageTimestamp: 1700000020,
-        },
-      ],
-    });
-    await new Promise(r => setImmediate(r));
-    expect((await adapter.getChats())[0]?.id).toBe('628111@c.us');
-    await expect(act(adapter)).resolves.toBe(true);
-    expect(fakeSock.chatModify).toHaveBeenCalledWith(
-      expect.objectContaining({
-        lastMessages: [{ key: expect.objectContaining({ id: 'M1' }) as unknown, messageTimestamp: 1700000020 }],
-      }),
-      '484848@lid',
-    );
-  });
+  ])(
+    '%s addresses a lid-keyed chat by its lid when called with the phone alias confirmed by a fresh query',
+    async (_n, act) => {
+      const adapter = newAdapter();
+      await adapter.initialize({});
+      fakeSock.fire('connection.update', { connection: 'open' });
+      fakeSock.fire('chats.upsert', [{ id: '484848@lid' }]);
+      fakeSock.fire('messages.upsert', {
+        type: 'notify',
+        messages: [
+          {
+            key: { remoteJid: '484848@lid', remoteJidAlt: '628111@s.whatsapp.net', fromMe: false, id: 'M1' },
+            message: { conversation: 'hi' },
+            messageTimestamp: 1700000020,
+          },
+        ],
+      });
+      await new Promise(r => setImmediate(r));
+      expect((await adapter.getChats())[0]?.id).toBe('484848@lid');
+      fakeSock.executeUSyncQuery.mockResolvedValueOnce({ list: [{ id: '628111@s.whatsapp.net', lid: '484848@lid' }] });
+      await expect(act(adapter)).resolves.toBe(true);
+      expect(fakeSock.chatModify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lastMessages: [{ key: expect.objectContaining({ id: 'M1' }) as unknown, messageTimestamp: 1700000020 }],
+        }),
+        '484848@lid',
+      );
+    },
+  );
 
   // The writes that need no last message resolve the chat the same way. Keyed by the phone jid, the
   // patch named a chat the phone does not hold, and its local echo added a second row to GET /chats
   // under the same @c.us id, carrying the mute or pin the listed row never showed.
-  describe('writes without a last message on a lid-keyed chat called with the listed @c.us id', () => {
+  describe('writes without a last message on a lid-keyed chat called with the phone alias confirmed by a fresh query', () => {
     const lidKeyedChat = async (): Promise<BaileysAdapter> => {
       const adapter = newAdapter();
       await adapter.initialize({});
@@ -6970,7 +7858,8 @@ describe('BaileysAdapter sendSeen + markUnread + deleteChat', () => {
         ],
       });
       await new Promise(r => setImmediate(r));
-      expect((await adapter.getChats()).map(c => c.id)).toEqual(['628111@c.us']);
+      expect((await adapter.getChats()).map(c => c.id)).toEqual(['484848@lid']);
+      fakeSock.executeUSyncQuery.mockResolvedValueOnce({ list: [{ id: '628111@s.whatsapp.net', lid: '484848@lid' }] });
       return adapter;
     };
 
@@ -6990,7 +7879,7 @@ describe('BaileysAdapter sendSeen + markUnread + deleteChat', () => {
       // Baileys replays its own patch as chats.update under the jid the patch was indexed by.
       fakeSock.fire('chats.update', [{ id: jid, ...echo }]);
       expect(await adapter.getChats()).toEqual([
-        expect.objectContaining({ id: '628111@c.us', name: 'Alice', ...state }),
+        expect.objectContaining({ id: '484848@lid', name: 'Alice', ...state }),
       ]);
     });
 
@@ -7037,8 +7926,16 @@ describe('BaileysAdapter sendSeen + markUnread + deleteChat', () => {
 
   it('setGroupPicture targets the GROUP jid, not the own account', async () => {
     const adapter = await readyWithMessage();
-    await adapter.setGroupPicture('120363@g.us', { mimetype: 'image/png', data: 'QUJD' });
-    expect(fakeSock.updateProfilePicture).toHaveBeenCalledWith('120363@g.us', expect.any(Buffer));
+    await adapter.setGroupPicture('120363@g.us', { mimetype: 'image/png', data: PNG_BYTES.toString('base64') });
+    expect(fakeSock.updateProfilePicture).toHaveBeenCalledWith('120363@g.us', PNG_BYTES);
+  });
+
+  it('setGroupPicture refuses an SVG with a 400 and uploads nothing', async () => {
+    const adapter = await readyWithMessage();
+    await expect(
+      adapter.setGroupPicture('120363@g.us', { mimetype: 'image/svg+xml', data: SVG_BYTES.toString('base64') }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(fakeSock.updateProfilePicture).not.toHaveBeenCalled();
   });
 
   it('deleteGroupPicture removes by the GROUP jid', async () => {
@@ -7301,6 +8198,14 @@ describe('BaileysAdapter status posting', () => {
     const failure = new Error('not-acceptable');
     fakeSock.sendMessage.mockRejectedValue(failure);
     await expect(adapter.postTextStatus('hello', { recipients: ['628111@c.us'] })).rejects.toBe(failure);
+  });
+
+  it('a status post throttled by WhatsApp is a retryable 503, not a bare 500', async () => {
+    const adapter = await ready();
+    fakeSock.sendMessage.mockRejectedValue(new Boom('rate-overlimit', { data: 429 }));
+    await expect(adapter.postTextStatus('hello', { recipients: ['628111@c.us'] })).rejects.toBeInstanceOf(
+      EngineThrottledError,
+    );
   });
 });
 
@@ -8413,6 +9318,23 @@ describe('BaileysAdapter voice status', () => {
     expect(options.statusJidList).toEqual(['628111@s.whatsapp.net']);
   });
 
+  // Baileys reads the file itself, in this process, for whichever of the two the content leaves out.
+  it('hands Baileys the duration and waveform read in the child, as a sent voice note does', async () => {
+    const waveform = Uint8Array.from({ length: 64 }, (_, bar) => bar);
+    (describeAudio as jest.Mock).mockResolvedValueOnce({ seconds: 4, waveform });
+    const adapter = await ready();
+
+    await adapter.postVoiceStatus(
+      { mimetype: 'audio/ogg; codecs=opus', data: Buffer.from('audio').toString('base64') },
+      { recipients: ['628111@c.us'] },
+    );
+
+    expect(describeAudio).toHaveBeenLastCalledWith(Buffer.from('audio'), true);
+    const [, content] = fakeSock.sendMessage.mock.calls[0] as [string, { seconds?: number; waveform?: Uint8Array }];
+    expect(content.seconds).toBe(4);
+    expect(content.waveform).toBe(waveform);
+  });
+
   // WhatsApp has nowhere to render a caption on a status voice note.
   it('carries no caption', async () => {
     const adapter = await ready();
@@ -8572,7 +9494,11 @@ describe('BaileysAdapter keeps the message store in step with edits and deletes'
     fireProtocol({ remoteJid: PEER, fromMe: false }, { key: { id: 'MINE' }, type: 0 });
     // The same author, from another group: the author check and the group-delete allowance both pass,
     // so only the chat check refuses it.
-    fireProtocol({ remoteJid: '120363999@g.us', participant: PEER, fromMe: false }, { key: { id: 'OTHER' }, type: 0 });
+    // An envelope has an id of its own, and two of them in flight never share one.
+    fireProtocol(
+      { id: 'ENVELOPE_OTHER', remoteJid: '120363999@g.us', participant: PEER, fromMe: false },
+      { key: { id: 'OTHER' }, type: 0 },
+    );
     await settle();
 
     expect(
@@ -8646,6 +9572,132 @@ describe('BaileysAdapter keeps the message store in step with edits and deletes'
     expect(fakeStore.put).toHaveBeenCalledTimes(2);
     expect(fakeStore.update).toHaveBeenCalledTimes(1);
     expect(fakeStore.put.mock.invocationCallOrder[1]).toBeLessThan(fakeStore.update.mock.invocationCallOrder[0]);
+  });
+
+  // A message id names one message of one chat and one sender. A contact who knows the id of a message
+  // the account is still downloading can send a text under it, and a delete after it: neither may take
+  // the id from the first, nor have the delete judged against the key of the second.
+  it('drops a delivery that reuses the id of a message still downloading under another sender', async () => {
+    let release!: () => void;
+    baileys.downloadMediaMessage.mockReturnValueOnce(
+      new Promise(resolve => {
+        release = () => resolve(streamOf(Buffer.from('JPEG')));
+      }),
+    );
+    const onMessage = jest.fn();
+    const onMessageCreate = jest.fn();
+    const onMessageRevoked = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage, onMessageCreate, onMessageRevoked });
+    fakeSock.fire('connection.update', { connection: 'open' });
+    const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: PEER, fromMe: true, id: 'REUSED' },
+          message: { imageMessage: { mimetype: 'image/jpeg', caption: 'sent from the phone' } },
+          messageTimestamp: 1700000099,
+        },
+      ],
+    });
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: PEER, fromMe: false, id: 'REUSED' },
+          message: { conversation: 'theirs' },
+          messageTimestamp: 1700000100,
+        },
+      ],
+    });
+    fireProtocol({ remoteJid: PEER, fromMe: false }, { key: { id: 'REUSED' }, type: 0 });
+    for (let i = 0; i < 5; i++) await settle();
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(onMessageRevoked).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      'Dropping a message that reuses the id of one still being processed',
+      expect.objectContaining({ msgId: 'REUSED' }),
+    );
+
+    release();
+    for (let i = 0; i < 5; i++) await settle();
+    expect(onMessageCreate).toHaveBeenCalledTimes(1);
+    expect(onMessageCreate).toHaveBeenCalledWith(expect.objectContaining({ id: 'REUSED', fromMe: true }));
+  });
+
+  it.each([
+    ['one-to-one chat', { remoteJid: PEER, fromMe: false }],
+    ['member of the same group', { remoteJid: GROUP, fromMe: false, participant: '628333@s.whatsapp.net' }],
+  ])('drops a reuse of the id of a group message still downloading from another %s', async (_name, key) => {
+    let release!: () => void;
+    baileys.downloadMediaMessage.mockReturnValueOnce(
+      new Promise(resolve => {
+        release = () => resolve(streamOf(Buffer.from('JPEG')));
+      }),
+    );
+    const onMessage = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage });
+    fakeSock.fire('connection.update', { connection: 'open' });
+    const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: GROUP, fromMe: false, participant: '628111@s.whatsapp.net', id: 'GROUPED' },
+          message: { imageMessage: { mimetype: 'image/jpeg', caption: 'the original' } },
+          messageTimestamp: 1700000099,
+        },
+      ],
+    });
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        { key: { ...key, id: 'GROUPED' }, message: { conversation: 'a reuse' }, messageTimestamp: 1700000100 },
+      ],
+    });
+    for (let i = 0; i < 5; i++) await settle();
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      'Dropping a message that reuses the id of one still being processed',
+      expect.objectContaining({ msgId: 'GROUPED' }),
+    );
+
+    release();
+    for (let i = 0; i < 5; i++) await settle();
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'GROUPED', body: 'the original' }));
+  });
+
+  it('still takes a repeat delivery of a message still downloading from the same chat and sender', async () => {
+    let release!: () => void;
+    baileys.downloadMediaMessage
+      .mockReturnValueOnce(
+        new Promise(resolve => {
+          release = () => resolve(streamOf(Buffer.from('JPEG')));
+        }),
+      )
+      .mockReturnValueOnce(Promise.resolve(streamOf(Buffer.from('JPEG'))));
+    const warn = jest.spyOn(loggerOf(await started()), 'warn').mockImplementation(() => undefined);
+    const delivery = () => ({
+      key: { remoteJid: PEER, fromMe: false, id: 'SAME' },
+      message: { imageMessage: { mimetype: 'image/jpeg', caption: 'twice' } },
+      messageTimestamp: 1700000099,
+    });
+    fakeSock.fire('messages.upsert', { type: 'notify', messages: [delivery()] });
+    fakeSock.fire('messages.upsert', { type: 'notify', messages: [delivery()] });
+    for (let i = 0; i < 5; i++) await settle();
+    release();
+    for (let i = 0; i < 5; i++) await settle();
+
+    expect(warn).not.toHaveBeenCalledWith(
+      'Dropping a message that reuses the id of one still being processed',
+      expect.anything(),
+    );
+    expect(fakeStore.put).toHaveBeenCalledTimes(2);
   });
 
   const ownStored = {
@@ -8731,5 +9783,1559 @@ describe('BaileysAdapter keeps the message store in step with edits and deletes'
       { deleteForMe: { deleteMedia: true, key: ownStored.key, timestamp: 1700000000 } },
       PEER,
     );
+  });
+
+  // An id names one message of one chat. A delivery that reuses the id of a message the account holds
+  // only in its messages table (history-synced, or older than the store's cap) finds nothing in the store,
+  // so its copy is stored under that id before the session finds the table already has the id. The
+  // session says so through the outcome of onMessage, and the copy must not outlive it: the real
+  // author's later edit, delete or reaction would be judged against the wrong chat and dropped.
+  describe('a delivery that reuses the id of another message', () => {
+    type Copy = { key: { id: string; remoteJid: string; participant?: string; fromMe?: boolean } };
+    const OTHER = '628222@s.whatsapp.net';
+    const dropped = 'Dropping an edit, revoke or reaction aimed at a message from another chat or author';
+    const copies = new Map<string, Copy>();
+
+    beforeEach(() => {
+      copies.clear();
+      fakeStore.put.mockReset().mockImplementation((_session: string, msg: Copy) => {
+        copies.set(msg.key.id, structuredClone(msg));
+        return Promise.resolve();
+      });
+      fakeStore.getMessage.mockImplementation((_session: string, id: string) =>
+        Promise.resolve(structuredClone(copies.get(id) ?? null)),
+      );
+      fakeStore.update
+        .mockReset()
+        .mockImplementation((_session: string, id: string, change: (m: Copy) => Copy | null) => {
+          const held = copies.get(id);
+          const next = held && change(structuredClone(held));
+          if (next) copies.set(id, next);
+          return Promise.resolve();
+        });
+      fakeStore.remove.mockReset().mockImplementation((_session: string, id: string, accept: (m: Copy) => boolean) => {
+        const held = copies.get(id);
+        if (held && accept(structuredClone(held))) copies.delete(id);
+        return Promise.resolve();
+      });
+    });
+
+    afterEach(() => {
+      fakeStore.put.mockReset().mockResolvedValue(undefined);
+      fakeStore.update.mockReset().mockResolvedValue(undefined);
+      fakeStore.remove.mockReset().mockResolvedValue(undefined);
+    });
+
+    /** An outcome the test settles itself, so it decides when the session answers. */
+    const answer = () => {
+      let resolve!: (outcome: InboundOutcome | undefined) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<InboundOutcome | undefined>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+
+    const startWith = async (callbacks: Partial<EngineEventCallbacks>): Promise<BaileysAdapter> => {
+      const adapter = newAdapter();
+      await adapter.initialize(callbacks);
+      fakeSock.fire('connection.update', { connection: 'open' });
+      return adapter;
+    };
+
+    /** The reusing delivery: a text from another one-to-one chat, under the id of the real message. */
+    const deliverReuse = (key: Record<string, unknown> = { remoteJid: OTHER, fromMe: false }) =>
+      fakeSock.fire('messages.upsert', {
+        type: 'notify',
+        messages: [{ key: { id: 'REUSED', ...key }, message: { conversation: 'late' }, messageTimestamp: 1700000100 }],
+      });
+
+    const settleAll = async (): Promise<void> => {
+      for (let i = 0; i < 6; i++) await settle();
+    };
+
+    const realEdit = () =>
+      fireProtocol(
+        { id: 'EDIT_ENV', remoteJid: PEER, fromMe: false },
+        { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: 'the real edit' } },
+      );
+
+    it('removes its own copy once the session says the id belongs to another message', async () => {
+      const answered = answer();
+      const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })) });
+      const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+      deliverReuse();
+      await settleAll();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+
+      expect(fakeStore.remove).toHaveBeenCalledWith('db-uuid-1', 'REUSED', expect.any(Function));
+      expect(copies.has('REUSED')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        'Dropping the stored copy of a message that reuses the id of another message',
+        expect.objectContaining({ msgId: 'REUSED', remoteJid: OTHER }),
+      );
+    });
+
+    it('takes the real message edit, delete and reaction that follow, judged against nothing wrong', async () => {
+      const onMessageEdited = jest.fn();
+      const onMessageRevoked = jest.fn();
+      const onMessageReaction = jest.fn();
+      await startWith({
+        onMessage: jest.fn(() => ({ settled: Promise.resolve({ conflict: true }) })),
+        onMessageEdited,
+        onMessageRevoked,
+        onMessageReaction,
+      });
+      deliverReuse();
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+
+      realEdit();
+      fireProtocol({ id: 'REVOKE_ENV', remoteJid: PEER, fromMe: false }, { key: { id: 'REUSED' }, type: 0 });
+      fakeSock.fire('messages.upsert', {
+        type: 'notify',
+        messages: [
+          {
+            key: { id: 'REACT_ENV', remoteJid: PEER, fromMe: false },
+            message: { reactionMessage: { key: { id: 'REUSED' }, text: '👍' } },
+            messageTimestamp: 1700000101,
+          },
+        ],
+      });
+      await settleAll();
+
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+      expect(onMessageRevoked).toHaveBeenCalledWith(expect.objectContaining({ id: 'REUSED', chatId: '628111@c.us' }), {
+        fromMe: false,
+      });
+      expect(onMessageReaction).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+    });
+
+    it.each([
+      ['says nothing', undefined],
+      ['reports no conflict', {}],
+      ['reports an explicit no', { conflict: false }],
+    ])('keeps its copy when the session %s, and keeps judging a change against it', async (_name, outcome) => {
+      const onMessageEdited = jest.fn();
+      const adapter = await startWith({
+        onMessage: jest.fn(() => ({ settled: Promise.resolve(outcome) })),
+        onMessageEdited,
+      });
+      const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+      deliverReuse();
+      await settleAll();
+
+      expect(fakeStore.remove).not.toHaveBeenCalled();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+
+      // Nothing proved the stored copy is another message's, so the edit from the other chat is foreign to it.
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        'Dropping an edit, revoke or reaction aimed at a message from another chat or author',
+        expect.objectContaining({ targetId: 'REUSED' }),
+      );
+    });
+
+    it('removes a copy only while it still carries the key of the delivery that stored it', async () => {
+      const answered = answer();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })) });
+      deliverReuse({ remoteJid: '120363000@g.us', participant: OTHER, fromMe: false });
+      await settleAll();
+      answered.resolve({ conflict: true });
+      await settleAll();
+      const accept = (fakeStore.remove.mock.calls[0] as [string, string, (m: Copy) => boolean])[2];
+
+      const group = '120363000@g.us';
+      expect(accept({ key: { id: 'REUSED', remoteJid: group, participant: OTHER, fromMe: false } })).toBe(true);
+      expect(accept({ key: { id: 'REUSED', remoteJid: group, participant: OTHER } })).toBe(true); // fromMe left out
+      expect(accept({ key: { id: 'REUSED', remoteJid: PEER, participant: OTHER, fromMe: false } })).toBe(false);
+      expect(accept({ key: { id: 'REUSED', remoteJid: group, participant: PEER, fromMe: false } })).toBe(false);
+      expect(accept({ key: { id: 'REUSED', remoteJid: group, participant: OTHER, fromMe: true } })).toBe(false);
+      expect(accept({ key: { id: 'REUSED', remoteJid: group, fromMe: false } })).toBe(false);
+    });
+
+    it('leaves a copy another write replaced meanwhile', async () => {
+      const answered = answer();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })) });
+      deliverReuse();
+      await settleAll();
+      // The real message's own copy took the id's place before the session answered.
+      copies.set('REUSED', { key: { id: 'REUSED', remoteJid: PEER, fromMe: false } });
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+
+      expect(fakeStore.remove).toHaveBeenCalledTimes(1);
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(PEER);
+    });
+
+    it('judges a change aimed at a status post by its copy, which the session does not hold, and still removes it', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+      deliverReuse({ remoteJid: 'status@broadcast', participant: OTHER, fromMe: false });
+      await settleAll();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe('status@broadcast');
+
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        'Dropping an edit, revoke or reaction aimed at a message from another chat or author',
+        expect.objectContaining({ targetId: 'REUSED' }),
+      );
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+    });
+
+    it('holds the real edit while the session has not answered, and hands it on once the copy is removed', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      deliverReuse();
+      await settleAll();
+
+      // The edit reads as foreign to the stored copy, which is the delivery the session has yet to judge.
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+      expect(fakeStore.remove.mock.invocationCallOrder[0]).toBeLessThan(onMessageEdited.mock.invocationCallOrder[0]);
+    });
+
+    // The read of the real edit runs on the store's clock, not the session's: it can begin under the hold and
+    // return the copy only after the answer removed it and ended the hold.
+    it('hands the real edit to the session when its store read outlasts the hold it began under', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      deliverReuse();
+      await settleAll();
+
+      let openGate!: () => void;
+      const gate = new Promise<void>(resolve => (openGate = resolve));
+      fakeStore.getMessage.mockImplementationOnce(async (_session: string, id: string) => {
+        const seen = structuredClone(copies.get(id) ?? null);
+        await gate;
+        return seen;
+      });
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+
+      openGate();
+      await settleAll();
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+    });
+
+    it('holds the real edit until the answer when its store read began before the delivery was stored', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+
+      let reading = false;
+      let openGate!: () => void;
+      const gate = new Promise<void>(resolve => (openGate = resolve));
+      fakeStore.getMessage.mockImplementationOnce(async (_session: string, id: string) => {
+        reading = true;
+        await gate;
+        return structuredClone(copies.get(id) ?? null);
+      });
+      realEdit();
+      await settleAll();
+      expect(reading).toBe(true);
+
+      deliverReuse();
+      await settleAll();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+
+      openGate();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+    });
+
+    it('reads again when the copy it returned was removed after the hold it began under had ended', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+
+      // The read starts before the delivery is stored, sees its copy, and returns only after the answer
+      // has removed that copy and ended the hold.
+      let stored!: () => void;
+      const copyStored = new Promise<void>(resolve => (stored = resolve));
+      let openGate!: () => void;
+      const gate = new Promise<void>(resolve => (openGate = resolve));
+      fakeStore.getMessage.mockImplementationOnce(async (_session: string, id: string) => {
+        await copyStored;
+        const seen = structuredClone(copies.get(id) ?? null);
+        await gate;
+        return seen;
+      });
+      realEdit();
+      await settleAll();
+
+      deliverReuse();
+      await settleAll();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+      stored();
+      await settleAll();
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+
+      openGate();
+      await settleAll();
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+    });
+
+    it('still drops a change from a third chat when the answer is no conflict and its read began under the hold', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      deliverReuse();
+      await settleAll();
+
+      let openGate!: () => void;
+      const gate = new Promise<void>(resolve => (openGate = resolve));
+      fakeStore.getMessage.mockImplementationOnce(async (_session: string, id: string) => {
+        const seen = structuredClone(copies.get(id) ?? null);
+        await gate;
+        return seen;
+      });
+      fireProtocol(
+        { id: 'FORGED_ENV', remoteJid: '628333@s.whatsapp.net', fromMe: false },
+        { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: 'forged' } },
+      );
+      await settleAll();
+
+      answered.resolve({ conflict: false });
+      await settleAll();
+      expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+
+      openGate();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+    });
+
+    it('keeps a change held until the removal of the copy has run', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      deliverReuse();
+      await settleAll();
+
+      // The delete is queued behind other writes of the id and has not run when the answer comes.
+      let runRemoval!: () => void;
+      const removalQueued = new Promise<void>(resolve => (runRemoval = resolve));
+      fakeStore.remove.mockImplementationOnce(async (_session: string, id: string) => {
+        await removalQueued;
+        copies.delete(id);
+      });
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(true);
+
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+      runRemoval();
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+      expect(onMessageEdited).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: 'REUSED', chatId: '628111@c.us' }),
+      );
+    });
+
+    it('applies the edit of the delivery itself to its copy before the answer, and still removes it', async () => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      deliverReuse();
+      await settleAll();
+
+      fireProtocol(
+        { id: 'OWN_EDIT_ENV', remoteJid: OTHER, fromMe: false },
+        { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: 'late, edited' } },
+      );
+      await settleAll();
+      expect(fakeStore.update).toHaveBeenCalledWith('db-uuid-1', 'REUSED', expect.any(Function));
+      expect(onMessageEdited).toHaveBeenCalledTimes(1);
+
+      answered.resolve({ conflict: true });
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+    });
+
+    it('judges a change against the copy once every delivery of the id has been answered', async () => {
+      const first = answer();
+      const second = answer();
+      const outcomes = [first.promise, second.promise];
+      const onMessageEdited = jest.fn();
+      const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: outcomes.shift()! })), onMessageEdited });
+      const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+      // Both pass the repeat check before either is stored, as a repeat sent while the first is processed does.
+      fakeSock.fire('messages.upsert', {
+        type: 'notify',
+        messages: [1, 2].map(() => ({
+          key: { id: 'REUSED', remoteJid: OTHER, fromMe: false },
+          message: { conversation: 'late' },
+          messageTimestamp: 1700000100,
+        })),
+      });
+      await settleAll();
+      expect(fakeStore.put).toHaveBeenCalledTimes(2);
+
+      first.resolve(undefined);
+      await settleAll();
+      realEdit();
+      await settleAll();
+      // The second delivery is still unanswered, so the copy cannot judge the change yet.
+      expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+      second.resolve(undefined);
+      await settleAll();
+      expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+      realEdit();
+      await settleAll();
+      expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(2);
+      expect(onMessageEdited).not.toHaveBeenCalled();
+    });
+
+    // The reusing delivery is not stored, and its receipt does not exist, until its processing (the limiter
+    // queue, the repeat check, a media download) is over. A change that arrives meanwhile can only be judged
+    // against the key the delivery arrived under, which says nothing of which message the id names. It waits
+    // for the delivery, and then for the session's answer, and is judged once those are in.
+    describe('a change that arrives while the delivery is still being processed', () => {
+      const THIRD = '628333@s.whatsapp.net';
+      const WAIT_MS = 3 * 30_000;
+      type Kind = 'edit' | 'delete' | 'reaction';
+      const kinds: Kind[] = ['edit', 'delete', 'reaction'];
+
+      /**
+       * Holds the reads of the store the given calls make (counted from 1, in the order they are made), each
+       * answering what the copy was when it began. The first read is the delivery's repeat check.
+       */
+      const holdReads = (indexes: number[]): ((index: number) => void) => {
+        const opens = new Map<number, () => void>();
+        const gates = new Map<number, Promise<void>>();
+        for (const index of indexes) gates.set(index, new Promise<void>(resolve => opens.set(index, resolve)));
+        let call = 0;
+        fakeStore.getMessage.mockImplementation(async (_session: string, id: string) => {
+          const seen = structuredClone(copies.get(id) ?? null);
+          await gates.get(++call);
+          return seen;
+        });
+        return index => opens.get(index)!();
+      };
+
+      const changeFrom = (kind: Kind, remoteJid: string): void => {
+        const key = { id: 'CHANGE_ENV', remoteJid, fromMe: false };
+        if (kind === 'edit') {
+          fireProtocol(key, { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: 'the real edit' } });
+        } else if (kind === 'delete') {
+          fireProtocol(key, { key: { id: 'REUSED' }, type: 0 });
+        } else {
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key,
+                message: { reactionMessage: { key: { id: 'REUSED' }, text: '👍' } },
+                messageTimestamp: 1700000101,
+              },
+            ],
+          });
+        }
+      };
+
+      const sessionCallbacks = () => ({
+        onMessageEdited: jest.fn(),
+        onMessageRevoked: jest.fn(),
+        onMessageReaction: jest.fn(),
+      });
+      const handedOn = (callbacks: ReturnType<typeof sessionCallbacks>, kind: Kind): jest.Mock =>
+        ({
+          edit: callbacks.onMessageEdited,
+          delete: callbacks.onMessageRevoked,
+          reaction: callbacks.onMessageReaction,
+        })[kind];
+
+      it.each(kinds)('holds a real %s until the delivery is stored and answered, then hands it on', async kind => {
+        const answered = answer();
+        const callbacks = sessionCallbacks();
+        const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), ...callbacks });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        const open = holdReads([1]);
+        deliverReuse();
+        await settleAll();
+        expect(copies.has('REUSED')).toBe(false);
+
+        changeFrom(kind, PEER);
+        await settleAll();
+        expect(handedOn(callbacks, kind)).not.toHaveBeenCalled();
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+        open(1);
+        await settleAll();
+        expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+        // The delivery's copy stands in for a message the session may hold under another chat.
+        expect(handedOn(callbacks, kind)).not.toHaveBeenCalled();
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+        answered.resolve({ conflict: true });
+        await settleAll();
+        expect(copies.has('REUSED')).toBe(false);
+        expect(handedOn(callbacks, kind)).toHaveBeenCalledTimes(1);
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+      });
+
+      it.each(kinds)('lands a real %s when the session reports the conflict before it is judged again', async kind => {
+        const answered = answer();
+        const callbacks = sessionCallbacks();
+        const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), ...callbacks });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        // The change's second read, made once the delivery is stored, still sees the copy the answer removes.
+        const open = holdReads([1, 3]);
+        deliverReuse();
+        await settleAll();
+        changeFrom(kind, PEER);
+        await settleAll();
+        open(1);
+        await settleAll();
+        expect(handedOn(callbacks, kind)).not.toHaveBeenCalled();
+
+        answered.resolve({ conflict: true });
+        await settleAll();
+        expect(copies.has('REUSED')).toBe(false);
+        open(3);
+        await settleAll();
+
+        expect(handedOn(callbacks, kind)).toHaveBeenCalledTimes(1);
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+      });
+
+      it.each(kinds.flatMap(kind => [PEER, THIRD].map(from => [kind, from] as const)))(
+        'drops a %s from %s once the delivery is stored and the session found it was the message',
+        async (kind, from) => {
+          const answered = answer();
+          const callbacks = sessionCallbacks();
+          const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), ...callbacks });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          const open = holdReads([1, 3]);
+          deliverReuse();
+          await settleAll();
+          changeFrom(kind, from);
+          await settleAll();
+          open(1);
+          await settleAll();
+
+          // The answer comes before the change is judged against the stored copy again.
+          answered.resolve({ conflict: false });
+          await settleAll();
+          open(3);
+          await settleAll();
+
+          expect(handedOn(callbacks, kind)).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+          expect(copies.get('REUSED')?.key.remoteJid).toBe(OTHER);
+        },
+      );
+
+      // The copy that is removed was the delivery's, so nothing the adapter holds names the message: the change
+      // goes to the session, which judges it by its row. A copy that stays is the message, and the change is
+      // foreign to it.
+      it.each(kinds.flatMap(kind => [true, false].map(conflict => [kind, conflict] as const)))(
+        'holds the %s from a third chat until the session answers (delivery conflicts: %s)',
+        async (kind, conflict) => {
+          const callbacks = sessionCallbacks();
+          const answered = answer();
+          const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), ...callbacks });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          const open = holdReads([1]);
+          deliverReuse();
+          await settleAll();
+          changeFrom(kind, THIRD);
+          await settleAll();
+          open(1);
+          await settleAll();
+          expect(handedOn(callbacks, kind)).not.toHaveBeenCalled();
+          expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+          answered.resolve({ conflict });
+          await settleAll();
+          expect(handedOn(callbacks, kind)).toHaveBeenCalledTimes(conflict ? 1 : 0);
+          expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(conflict ? 0 : 1);
+        },
+      );
+
+      // A copy removed under another id says nothing of the delivery this change waited for: it was never
+      // reported as a conflict, so its key still names what the change is judged against.
+      it.each([
+        ['succeeds', undefined],
+        ['fails', new Error('db locked')],
+      ])(
+        'keeps a forged change from a third chat held when a copy of another id is removed (%s)',
+        async (_, failure) => {
+          const answered = answer();
+          const callbacks = sessionCallbacks();
+          const adapter = await startWith({
+            onMessage: jest.fn((message: IncomingMessage) => ({
+              settled: message.id === 'REUSED' ? answered.promise : Promise.resolve({ conflict: true }),
+            })),
+            ...callbacks,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          // The store keeps nothing, so only the key the delivery arrived under can judge the change.
+          fakeStore.put.mockRejectedValue(new Error('db locked'));
+          if (failure) fakeStore.remove.mockRejectedValue(failure);
+          const open = holdReads([1]);
+          deliverReuse();
+          await settleAll();
+          changeFrom('edit', THIRD);
+          await settleAll();
+
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'UNRELATED', remoteJid: OTHER, fromMe: false },
+                message: { conversation: 'another one' },
+                messageTimestamp: 1700000102,
+              },
+            ],
+          });
+          await settleAll();
+          expect(fakeStore.remove).toHaveBeenCalledWith('db-uuid-1', 'UNRELATED', expect.any(Function));
+
+          open(1);
+          await settleAll();
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+          expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+          answered.resolve({ conflict: false });
+          await settleAll();
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+        },
+      );
+
+      // The conflict that was reported is the delivery's own: its copy was never stored, so a removal that
+      // fails still says the key it arrived under does not name the message.
+      it('hands the real change on when the removal of the copy of the delivery itself fails', async () => {
+        const callbacks = sessionCallbacks();
+        const adapter = await startWith({
+          onMessage: jest.fn(() => ({ settled: Promise.resolve({ conflict: true }) })),
+          ...callbacks,
+        });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        fakeStore.put.mockRejectedValue(new Error('db locked'));
+        fakeStore.remove.mockRejectedValue(new Error('db locked'));
+        const open = holdReads([1]);
+        deliverReuse();
+        await settleAll();
+        changeFrom('edit', PEER);
+        await settleAll();
+        expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+
+        open(1);
+        await settleAll();
+        expect(callbacks.onMessageEdited).toHaveBeenCalledTimes(1);
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+      });
+
+      it('does not hold an edit from the chat the delivery arrived in for the answer', async () => {
+        const callbacks = sessionCallbacks();
+        await startWith({ onMessage: jest.fn(() => ({ settled: answer().promise })), ...callbacks });
+        const open = holdReads([1]);
+        deliverReuse();
+        await settleAll();
+
+        fireProtocol(
+          { id: 'OWN_EDIT_ENV', remoteJid: OTHER, fromMe: false },
+          { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: 'late, edited' } },
+        );
+        await settleAll();
+        // It follows the delivery's emit, which the answer of the session does not hold up.
+        expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+        open(1);
+        await settleAll();
+
+        expect(callbacks.onMessageEdited).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ['a status post', { remoteJid: 'status@broadcast', participant: OTHER, fromMe: false }],
+        ['a message the account sent', { remoteJid: OTHER, fromMe: true }],
+      ])('judges a change at once against %s still being processed, as no answer can come for it', async (_, key) => {
+        const callbacks = sessionCallbacks();
+        const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answer().promise })), ...callbacks });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        holdReads([1]);
+        deliverReuse(key);
+        await settleAll();
+
+        changeFrom('edit', PEER);
+        await settleAll();
+
+        expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+      });
+
+      it.each(kinds)(
+        'gives up its place in the chat order while a %s waits, as no change is ever announced there',
+        async kind => {
+          const ticket = () => ({
+            reserve: jest.fn(() => false),
+            holdUntil: jest.fn(),
+            drop: jest.fn(),
+            revoked: false,
+          });
+          const delivery = ticket();
+          const change = ticket();
+          const tickets = [delivery, change];
+          await startWith({
+            admitInbound: jest.fn(() => tickets.shift()),
+            onMessage: jest.fn(() => ({ settled: answer().promise })),
+            ...sessionCallbacks(),
+          });
+          const open = holdReads([1]);
+          deliverReuse();
+          await settleAll();
+          changeFrom(kind, PEER);
+          await settleAll();
+
+          expect(change.drop).toHaveBeenCalledTimes(1);
+          expect(delivery.drop).not.toHaveBeenCalled();
+          open(1);
+          await settleAll();
+        },
+      );
+
+      describe('that does not finish', () => {
+        beforeEach(() => {
+          jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+        });
+
+        afterEach(() => {
+          jest.useRealTimers();
+        });
+
+        it('drops the change after three download deadlines, and nothing waits on the delivery then', async () => {
+          const callbacks = sessionCallbacks();
+          const adapter = await startWith({
+            onMessage: jest.fn(() => ({ settled: answer().promise })),
+            ...callbacks,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          const idle = jest.getTimerCount();
+          const open = holdReads([1]);
+          deliverReuse();
+          await settleAll();
+          realEdit();
+          await settleAll();
+
+          jest.advanceTimersByTime(WAIT_MS - 1);
+          await settleAll();
+          expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+          jest.advanceTimersByTime(1);
+          await settleAll();
+          expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+
+          // The delivery finishes after all, and its timer for the change is already gone.
+          open(1);
+          await settleAll();
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+          expect(jest.getTimerCount()).toBe(idle + 1); // the delivery's own hold on its answer
+        });
+
+        it('parks only so many changes, judging the rest at once, and frees every timer', async () => {
+          const limit = (BaileysEvents as unknown as { CHANGES_PARKED_LIMIT: number }).CHANGES_PARKED_LIMIT;
+          const callbacks = sessionCallbacks();
+          const answered = answer();
+          const adapter = await startWith({
+            onMessage: jest.fn(() => ({ settled: answered.promise })),
+            ...callbacks,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          const idle = jest.getTimerCount();
+          const open = holdReads([1]);
+          deliverReuse();
+          await settleAll();
+
+          const flood = limit + 6;
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: Array.from({ length: flood }, (_, i) => ({
+              key: { id: `FLOOD_${i}`, remoteJid: PEER, fromMe: false },
+              message: {
+                protocolMessage: { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: `edit ${i}` } },
+              },
+              messageTimestamp: 1700000100,
+            })),
+          });
+          await settleAll();
+          expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(6);
+          expect(jest.getTimerCount() - idle).toBe(limit);
+
+          // The delivery is stored and waits for its answer: the parked changes wait for that too.
+          open(1);
+          await settleAll();
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+          expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(6);
+
+          answered.resolve({ conflict: true });
+          await settleAll();
+          expect(callbacks.onMessageEdited).toHaveBeenCalledTimes(limit);
+          expect(jest.getTimerCount()).toBe(idle);
+        });
+
+        it('parks only so many changes on an answer, dropping the rest at once, and frees every timer', async () => {
+          const limit = (BaileysEvents as unknown as { CHANGES_PARKED_LIMIT: number }).CHANGES_PARKED_LIMIT;
+          const callbacks = sessionCallbacks();
+          const answered = answer();
+          const adapter = await startWith({
+            onMessage: jest.fn(() => ({ settled: answered.promise })),
+            ...callbacks,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          deliverReuse();
+          await settleAll();
+          const idle = jest.getTimerCount();
+
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: Array.from({ length: limit + 6 }, (_, i) => ({
+              key: { id: `FLOOD_${i}`, remoteJid: PEER, fromMe: false },
+              message: {
+                protocolMessage: { key: { id: 'REUSED' }, type: 14, editedMessage: { conversation: `edit ${i}` } },
+              },
+              messageTimestamp: 1700000100,
+            })),
+          });
+          await settleAll();
+          // Never handed on unjudged: what cannot wait is dropped.
+          expect(callbacks.onMessageEdited).not.toHaveBeenCalled();
+          expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(6);
+          expect(jest.getTimerCount() - idle).toBe(limit);
+
+          answered.resolve({ conflict: true });
+          await settleAll();
+          expect(callbacks.onMessageEdited).toHaveBeenCalledTimes(limit);
+          expect(jest.getTimerCount()).toBe(idle - 1); // the delivery's own hold is gone too
+        });
+      });
+    });
+
+    // The adapter acts on a change itself before the session judges it: the chat preview, the record of a
+    // delete, the stored copy and the callbacks. A change that reads as foreign to the copy it names must not
+    // do any of that while the session has not said whether the copy is the message.
+    describe('a forged change aimed at a delivery whose answer is pending', () => {
+      const GROUP = '120363000@g.us';
+      const MEMBER_1 = '628222@s.whatsapp.net';
+      const MEMBER_2 = '628333@s.whatsapp.net';
+      const outcomes: Array<[string, InboundOutcome | undefined]> = [
+        ['the session finds no conflict', { conflict: false }],
+        ['the session says nothing', undefined],
+      ];
+
+      const preview = async (adapter: BaileysAdapter, chat: string): Promise<string | undefined> =>
+        (await adapter.getChats()).find(c => c.id === chat)?.lastMessage;
+
+      const receive = (id: string, key: Record<string, unknown>): void => {
+        fakeSock.fire('messages.upsert', {
+          type: 'notify',
+          messages: [
+            {
+              key: { id, fromMe: false, ...key },
+              message: { conversation: 'original text' },
+              messageTimestamp: 1700000100,
+            },
+          ],
+        });
+      };
+
+      it.each(outcomes)(
+        "keeps a group message's preview and callbacks clear of another member's edit while it waits and after it, when %s",
+        async (_, outcome) => {
+          const answered = answer();
+          const onMessageEdited = jest.fn();
+          const adapter = await startWith({
+            onMessage: jest.fn(() => ({ settled: answered.promise })),
+            onMessageEdited,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          fakeSock.fire('chats.upsert', [{ id: GROUP, name: 'Team' }]);
+          receive('GRP1', { remoteJid: GROUP, participant: MEMBER_1 });
+          await settleAll();
+          expect(await preview(adapter, GROUP)).toBe('original text');
+
+          fireProtocol(
+            { id: 'EDIT_P2', remoteJid: GROUP, participant: MEMBER_2, fromMe: false },
+            { key: { id: 'GRP1' }, type: 14, editedMessage: { conversation: 'FORGED BY P2' } },
+          );
+          await settleAll();
+          expect(await preview(adapter, GROUP)).toBe('original text');
+          expect(onMessageEdited).not.toHaveBeenCalled();
+
+          answered.resolve(outcome);
+          await settleAll();
+          expect(await preview(adapter, GROUP)).toBe('original text');
+          expect(onMessageEdited).not.toHaveBeenCalled();
+          expect(fakeStore.update).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'GRP1' }));
+        },
+      );
+
+      it.each(outcomes)(
+        'does nothing for an edit, a delete and a reaction from another chat while it waits and after it, when %s',
+        async (_, outcome) => {
+          const answered = answer();
+          const onMessageEdited = jest.fn();
+          const onMessageRevoked = jest.fn();
+          const onMessageReaction = jest.fn();
+          const adapter = await startWith({
+            onMessage: jest.fn(() => ({ settled: answered.promise })),
+            onMessageEdited,
+            onMessageRevoked,
+            onMessageReaction,
+          });
+          fakeSock.fire('chats.upsert', [{ id: PEER, name: 'Alice' }]);
+          receive('DM1', { remoteJid: PEER });
+          await settleAll();
+
+          const third = { remoteJid: '628444@s.whatsapp.net', fromMe: false };
+          fireProtocol(
+            { id: 'EDIT_ENV', ...third },
+            { key: { id: 'DM1' }, type: 14, editedMessage: { conversation: 'FORGED' } },
+          );
+          fireProtocol({ id: 'REVOKE_ENV', ...third }, { key: { id: 'DM1' }, type: 0 });
+          fakeSock.fire('messages.upsert', {
+            type: 'notify',
+            messages: [
+              {
+                key: { id: 'REACT_ENV', ...third },
+                message: { reactionMessage: { key: { id: 'DM1' }, text: '👎' } },
+                messageTimestamp: 1700000101,
+              },
+            ],
+          });
+          await settleAll();
+          const expectUntouched = async (): Promise<void> => {
+            expect(await preview(adapter, '628111@c.us')).toBe('original text');
+            expect(onMessageEdited).not.toHaveBeenCalled();
+            expect(onMessageRevoked).not.toHaveBeenCalled();
+            expect(onMessageReaction).not.toHaveBeenCalled();
+            expect((adapter as unknown as { events: BaileysEvents }).events.wasDeletedForEveryone('DM1')).toBe(false);
+            expect(fakeStore.update).not.toHaveBeenCalled();
+          };
+          await expectUntouched();
+
+          answered.resolve(outcome);
+          await settleAll();
+          await expectUntouched();
+        },
+      );
+
+      // The edit meets the delivery while it is still processed, and the store keeps no copy of it, so the key
+      // it arrived under is all there is to judge by. A copy of another id removed meanwhile does not change that.
+      it.each(outcomes)(
+        "keeps a group message's preview and callbacks clear of another member's edit when a copy of another id is removed meanwhile, when %s",
+        async (_, outcome) => {
+          const answered = answer();
+          const onMessageEdited = jest.fn();
+          const adapter = await startWith({
+            onMessage: jest.fn((message: IncomingMessage) => ({
+              settled: message.id === 'GRP1' ? answered.promise : Promise.resolve({ conflict: true }),
+            })),
+            onMessageEdited,
+          });
+          const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+          fakeStore.put.mockRejectedValue(new Error('db locked'));
+          fakeSock.fire('chats.upsert', [{ id: GROUP, name: 'Team' }]);
+          let openRead!: () => void;
+          const gate = new Promise<void>(resolve => (openRead = resolve));
+          fakeStore.getMessage.mockImplementationOnce(async () => {
+            await gate;
+            return null;
+          });
+          receive('GRP1', { remoteJid: GROUP, participant: MEMBER_1 });
+          await settleAll();
+
+          fireProtocol(
+            { id: 'EDIT_P2', remoteJid: GROUP, participant: MEMBER_2, fromMe: false },
+            { key: { id: 'GRP1' }, type: 14, editedMessage: { conversation: 'FORGED BY P2' } },
+          );
+          await settleAll();
+          receive('OTHER1', { remoteJid: '628444@s.whatsapp.net' });
+          await settleAll();
+          expect(fakeStore.remove).toHaveBeenCalledWith('db-uuid-1', 'OTHER1', expect.any(Function));
+
+          openRead();
+          await settleAll();
+          answered.resolve(outcome);
+          await settleAll();
+
+          expect(await preview(adapter, GROUP)).toBe('original text');
+          expect(onMessageEdited).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'GRP1' }));
+        },
+      );
+
+      it('still applies the edit of the real author while the answer is pending', async () => {
+        const answered = answer();
+        const onMessageEdited = jest.fn();
+        const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+        fakeSock.fire('chats.upsert', [{ id: GROUP, name: 'Team' }]);
+        receive('GRP1', { remoteJid: GROUP, participant: MEMBER_1 });
+        await settleAll();
+
+        fireProtocol(
+          { id: 'EDIT_P1', remoteJid: GROUP, participant: MEMBER_1, fromMe: false },
+          { key: { id: 'GRP1' }, type: 14, editedMessage: { conversation: 'fixed by the author' } },
+        );
+        await settleAll();
+
+        expect(onMessageEdited).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'GRP1' }));
+        expect(await preview(adapter, GROUP)).toBe('fixed by the author');
+      });
+    });
+
+    describe('an answer that does not come', () => {
+      const HOLD_MS = 5 * 60_000;
+
+      beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('stops holding the id for the session after a while, so a change is judged against the copy', async () => {
+        const onMessageEdited = jest.fn();
+        const adapter = await startWith({
+          onMessage: jest.fn(() => ({ settled: new Promise<InboundOutcome | undefined>(() => undefined) })),
+          onMessageEdited,
+        });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        deliverReuse();
+        await settleAll();
+
+        realEdit();
+        await settleAll();
+        jest.advanceTimersByTime(HOLD_MS - 1);
+        await settleAll();
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+        jest.advanceTimersByTime(1);
+        await settleAll();
+        // Never handed on unjudged: the copy it was parked for is all there is to judge it by.
+        expect(onMessageEdited).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+
+        realEdit();
+        await settleAll();
+        expect(onMessageEdited).not.toHaveBeenCalled();
+        expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(2);
+      });
+
+      it('sets none of its timers to keep the process alive', async () => {
+        const WAIT_MS = 3 * 30_000; // a change waiting for a delivery to be processed
+        const answered = answer();
+        await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited: jest.fn() });
+        // The delivery's repeat check is held, so the change meets it while it is still being processed.
+        let openRead!: () => void;
+        const gate = new Promise<void>(resolve => (openRead = resolve));
+        fakeStore.getMessage.mockImplementationOnce(async (_session: string, id: string) => {
+          await gate;
+          return structuredClone(copies.get(id) ?? null);
+        });
+        const created: Array<{ ms: number; unref: jest.SpyInstance }> = [];
+        const setTimer = global.setTimeout;
+        const spy = jest.spyOn(global, 'setTimeout').mockImplementation((fn: () => void, ms?: number) => {
+          const timer = setTimer(fn, ms);
+          created.push({ ms: ms ?? 0, unref: jest.spyOn(timer, 'unref') });
+          return timer;
+        });
+        try {
+          // A change parked behind the delivery, then on the hold the delivery puts on its answer.
+          deliverReuse();
+          await settleAll();
+          realEdit();
+          await settleAll();
+          openRead();
+          await settleAll();
+        } finally {
+          spy.mockRestore();
+        }
+
+        const watched = created.filter(t => t.ms === HOLD_MS || t.ms === WAIT_MS);
+        expect(watched.map(t => t.ms)).toEqual([WAIT_MS, HOLD_MS, HOLD_MS]);
+        for (const timer of watched) expect(timer.unref).toHaveBeenCalledTimes(1);
+      });
+
+      it('still removes the copy when the session answers after the hold ended', async () => {
+        const answered = answer();
+        await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })) });
+        deliverReuse();
+        await settleAll();
+        jest.advanceTimersByTime(HOLD_MS);
+
+        answered.resolve({ conflict: true });
+        await settleAll();
+
+        expect(copies.has('REUSED')).toBe(false);
+      });
+
+      it('lets a late answer of one delivery leave the hold of a later delivery of the id alone', async () => {
+        const first = answer();
+        const second = answer();
+        const outcomes = [first.promise, second.promise];
+        const onMessageEdited = jest.fn();
+        const adapter = await startWith({
+          onMessage: jest.fn(() => ({ settled: outcomes.shift()! })),
+          onMessageEdited,
+        });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        deliverReuse();
+        await settleAll();
+        jest.advanceTimersByTime(60_000);
+        copies.delete('REUSED'); // the store let it go, so the repeat is not skipped as one it holds
+        deliverReuse();
+        await settleAll();
+
+        jest.advanceTimersByTime(HOLD_MS - 60_000); // the first delivery's hold ends, the second's has a minute left
+        first.resolve(undefined);
+        await settleAll();
+        realEdit();
+        await settleAll();
+
+        // Still held for the second, so the copy cannot judge the change yet.
+        expect(onMessageEdited).not.toHaveBeenCalled();
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+        second.resolve({ conflict: true });
+        await settleAll();
+        expect(onMessageEdited).toHaveBeenCalledTimes(1);
+        expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+      });
+
+      it('waits no longer than the hold lasts, however many deliveries of the id hold it in turn', async () => {
+        const first = answer();
+        const second = answer();
+        const outcomes = [first.promise, second.promise];
+        const onMessageEdited = jest.fn();
+        const adapter = await startWith({
+          onMessage: jest.fn(() => ({ settled: outcomes.shift()! })),
+          onMessageEdited,
+        });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        deliverReuse();
+        await settleAll();
+        realEdit();
+        await settleAll();
+        jest.advanceTimersByTime(2 * 60_000);
+        copies.delete('REUSED'); // the store let it go, so the repeat is not skipped as one it holds
+        deliverReuse();
+        await settleAll();
+
+        // The first hold ends on its timer, the second still has two minutes: the change was parked for the
+        // hold, which has lasted as long as a hold may, and is not handed on for the later delivery.
+        jest.advanceTimersByTime(HOLD_MS - 2 * 60_000);
+        await settleAll();
+        expect(onMessageEdited).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith(dropped, expect.objectContaining({ targetId: 'REUSED' }));
+      });
+
+      it('frees the hold at once when the answer comes', async () => {
+        const answered = answer();
+        await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })) });
+        const idle = jest.getTimerCount();
+        deliverReuse();
+        await settleAll();
+        expect(jest.getTimerCount()).toBeGreaterThan(idle);
+
+        answered.resolve(undefined);
+        await settleAll();
+
+        expect(jest.getTimerCount()).toBe(idle);
+      });
+    });
+
+    // A delivery the store cannot keep leaves no copy to judge by, so the key it arrived under stands in until
+    // a conflict is reported: then that delivery was not the message the id names.
+    it.each([
+      ['lands the real edit when the session reports the conflict', true],
+      ['drops a forged edit when the session finds the delivery was the message', false],
+    ])('%s for a delivery the store never held', async (_, conflict) => {
+      const answered = answer();
+      const onMessageEdited = jest.fn();
+      const adapter = await startWith({ onMessage: jest.fn(() => ({ settled: answered.promise })), onMessageEdited });
+      const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+      fakeStore.put.mockRejectedValue(new Error('disk full'));
+      // An earlier delivery of the id is still being processed, which keeps the id in flight after the
+      // repeat of it has been handed on.
+      let openFirst!: () => void;
+      const firstGate = new Promise<void>(resolve => (openFirst = resolve));
+      fakeStore.getMessage.mockImplementationOnce(async () => {
+        await firstGate;
+        return null;
+      });
+      deliverReuse();
+      deliverReuse();
+      await settleAll();
+      expect(copies.has('REUSED')).toBe(false);
+
+      realEdit();
+      await settleAll();
+      expect(onMessageEdited).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalledWith(dropped, expect.anything());
+
+      answered.resolve({ conflict });
+      await settleAll();
+      expect(warn.mock.calls.filter(([message]) => message === dropped)).toHaveLength(conflict ? 0 : 1);
+      // The real edit is judged, but follows the delivery that is still being processed.
+      expect(onMessageEdited).not.toHaveBeenCalled();
+
+      openFirst();
+      await settleAll();
+      expect(onMessageEdited).toHaveBeenCalledTimes(conflict ? 1 : 0);
+    });
+
+    it('is not held up by an answer that rejects, and warns once', async () => {
+      const unhandled: unknown[] = [];
+      const listen = (reason: unknown): number => unhandled.push(reason);
+      process.on('unhandledRejection', listen);
+      try {
+        const onMessage = jest
+          .fn()
+          .mockImplementationOnce(() => ({ settled: Promise.reject(new Error('projector went away')) }))
+          .mockImplementation(() => undefined);
+        const adapter = await startWith({ onMessage });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        deliverReuse();
+        await settleAll();
+        fakeSock.fire('messages.upsert', {
+          type: 'notify',
+          messages: [
+            {
+              key: { id: 'NEXT', remoteJid: PEER, fromMe: false },
+              message: { conversation: 'hi' },
+              messageTimestamp: 1,
+            },
+          ],
+        });
+        await settleAll();
+
+        expect(unhandled).toEqual([]);
+        expect(warn).toHaveBeenCalledWith(
+          'Could not act on what the session made of a message',
+          expect.objectContaining({ msgId: 'REUSED', error: 'projector went away' }),
+        );
+        expect(onMessage).toHaveBeenCalledTimes(2);
+        expect(copies.has('REUSED')).toBe(true);
+        expect(copies.has('NEXT')).toBe(true);
+      } finally {
+        process.off('unhandledRejection', listen);
+      }
+    });
+
+    it('is not held up by a callback that throws, or one that answers with something else', async () => {
+      const onMessage = jest
+        .fn()
+        .mockImplementationOnce(() => {
+          throw new Error('callback exploded');
+        })
+        .mockImplementationOnce(() => 'accepted')
+        .mockImplementation(() => undefined);
+      await startWith({ onMessage });
+      for (const id of ['A1', 'A2', 'A3']) {
+        fakeSock.fire('messages.upsert', {
+          type: 'notify',
+          messages: [
+            { key: { id, remoteJid: PEER, fromMe: false }, message: { conversation: id }, messageTimestamp: 1 },
+          ],
+        });
+        await settleAll();
+      }
+
+      expect(onMessage).toHaveBeenCalledTimes(3);
+      expect(fakeStore.remove).not.toHaveBeenCalled();
+    });
+
+    it('logs a store that cannot remove the copy instead of failing', async () => {
+      const unhandled: unknown[] = [];
+      const listen = (reason: unknown): number => unhandled.push(reason);
+      process.on('unhandledRejection', listen);
+      try {
+        fakeStore.remove.mockReset().mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'));
+        const adapter = await startWith({
+          onMessage: jest.fn(() => ({ settled: Promise.resolve({ conflict: true }) })),
+        });
+        const warn = jest.spyOn(loggerOf(adapter), 'warn').mockImplementation(() => undefined);
+        deliverReuse();
+        await settleAll();
+
+        expect(unhandled).toEqual([]);
+        expect(warn).toHaveBeenCalledWith(
+          'Failed to remove the stored copy of a conflicting message',
+          expect.objectContaining({ msgId: 'REUSED', error: 'SQLITE_BUSY: database is locked' }),
+        );
+      } finally {
+        process.off('unhandledRejection', listen);
+      }
+    });
+
+    it('does nothing for a callback that returns no answer, as before', async () => {
+      const onMessage = jest.fn();
+      await startWith({ onMessage });
+      deliverReuse();
+      await settleAll();
+
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      expect(fakeStore.remove).not.toHaveBeenCalled();
+      expect(copies.has('REUSED')).toBe(true);
+    });
+  });
+});
+
+describe('BaileysAdapter group metadata cache', () => {
+  const GROUP = '123-456@g.us';
+  const TTL_ENV = 'BAILEYS_GROUP_METADATA_CACHE_TTL_MS';
+  const savedTtl = process.env[TTL_ENV];
+  const meta = (members: string[]) => ({ id: GROUP, subject: 'G', participants: members.map(id => ({ id })) });
+
+  beforeEach(() => {
+    fakeSock.user = { id: '628999:1@s.whatsapp.net', name: 'Me' };
+    fakeSock.resetEmitter();
+    jest.clearAllMocks();
+    delete process.env[TTL_ENV];
+    fakeSock.groupMetadata.mockReset().mockResolvedValue(meta(['628111@s.whatsapp.net']));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    if (savedTtl === undefined) delete process.env[TTL_ENV];
+    else process.env[TTL_ENV] = savedTtl;
+  });
+
+  type SocketConfig = { cachedGroupMetadata: (jid: string) => Promise<unknown> };
+  const socketConfig = (): SocketConfig => {
+    const make = jest.requireMock<{ default: jest.Mock }>('@whiskeysockets/baileys').default;
+    const calls = make.mock.calls as Array<[SocketConfig]>;
+    return calls[calls.length - 1][0];
+  };
+  const ready = async (): Promise<BaileysAdapter> => {
+    const adapter = newAdapter();
+    await adapter.initialize({});
+    fakeSock.fire('connection.update', { connection: 'open' });
+    return adapter;
+  };
+
+  it('answers a group send from the cache after one query', async () => {
+    await ready();
+    const { cachedGroupMetadata } = socketConfig();
+
+    const first = await cachedGroupMetadata(GROUP);
+    const second = await cachedGroupMetadata(GROUP);
+
+    expect(first).toBe(second);
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(1);
+    expect(fakeSock.groupMetadata).toHaveBeenCalledWith(GROUP);
+  });
+
+  it('lets a failed query surface as the send error and tries again on the next send', async () => {
+    await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    fakeSock.groupMetadata.mockRejectedValueOnce(Object.assign(new Error('rate-overlimit'), { data: 429 }));
+
+    await expect(cachedGroupMetadata(GROUP)).rejects.toThrow('rate-overlimit');
+    await expect(cachedGroupMetadata(GROUP)).resolves.toMatchObject({ id: GROUP });
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('is off when the TTL is 0: the option answers nothing, so Baileys queries on its own', async () => {
+    process.env[TTL_ENV] = '0';
+    await ready();
+
+    await expect(socketConfig().cachedGroupMetadata(GROUP)).resolves.toBeUndefined();
+    expect(fakeSock.groupMetadata).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a participant is added or removed', 'group-participants.update', { id: GROUP, action: 'add', participants: [] }],
+    ['the group changes a setting', 'groups.update', [{ id: GROUP, announce: true }]],
+    ['the account is added to the group again', 'groups.upsert', [{ id: GROUP, participants: [] }]],
+    // Baileys reports a disappearing-messages change made on the phone as a chat update only, and the
+    // timer on the cached list is what a group send stamps on its stanza.
+    ['its disappearing-messages timer is changed', 'chats.update', [{ id: GROUP, ephemeralExpiration: 86400 }]],
+    ['its disappearing-messages timer is switched off', 'chats.update', [{ id: GROUP, ephemeralExpiration: null }]],
+  ])('reads the group again after %s', async (_label, event, payload) => {
+    await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+
+    fakeSock.fire(event, payload);
+    await cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a cached group through the chat updates that every message raises', async () => {
+    await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+
+    fakeSock.fire('chats.update', [{ id: GROUP, unreadCount: 3, conversationTimestamp: 1_700_000_000 }]);
+    await cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds the next send from the single-group query, not from a whole snapshot of the group list', async () => {
+    const queried = {
+      ...meta(['159442138038327@lid']),
+      addressingMode: 'lid',
+      ephemeralDuration: 86400,
+    };
+    fakeSock.groupMetadata.mockResolvedValue(queried);
+    await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+
+    // The all-groups listing can name participants in another id form and leave out the addressing mode
+    // and the disappearing timer; it must not become what the next group send is built from.
+    fakeSock.fire('groups.update', [meta(['628111@s.whatsapp.net', '628222@s.whatsapp.net'])]);
+    const next = await cachedGroupMetadata(GROUP);
+
+    expect(next).toBe(queried);
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('still reports the group events to consumers while it keeps the cache', async () => {
+    const onGroupEvent = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onGroupEvent });
+    fakeSock.fire('connection.update', { connection: 'open' });
+
+    fakeSock.fire('group-participants.update', {
+      id: GROUP,
+      action: 'add',
+      participants: ['628222@s.whatsapp.net'],
+    });
+
+    expect(onGroupEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'join', groupId: GROUP }));
+  });
+
+  it.each([
+    ['addParticipants', (a: BaileysAdapter) => a.addParticipants(GROUP, ['628222@c.us'])],
+    ['removeParticipants', (a: BaileysAdapter) => a.removeParticipants(GROUP, ['628111@c.us'])],
+    ['leaveGroup', (a: BaileysAdapter) => a.leaveGroup(GROUP)],
+  ])('reads the group again after %s, whether or not WhatsApp has reported the change yet', async (_label, write) => {
+    const adapter = await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+
+    await write(adapter);
+    await cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets a group when its write fails too, since the outcome may be partial', async () => {
+    const adapter = await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+    fakeSock.groupLeave.mockRejectedValueOnce(new Error('connection closed'));
+
+    await expect(adapter.leaveGroup(GROUP)).rejects.toThrow();
+    await cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts every new socket with an empty cache', async () => {
+    const adapter = await ready();
+    await socketConfig().cachedGroupMetadata(GROUP);
+
+    // A transient drop: the lifecycle builds a fresh socket without going through a teardown.
+    jest.useFakeTimers();
+    fakeSock.fire('connection.update', {
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 515 } } },
+    });
+    await jest.runAllTimersAsync();
+    await socketConfig().cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+    await adapter.destroy();
+  });
+
+  it('asks a new socket for a group whose query never came back on the previous one', async () => {
+    const adapter = await ready();
+    // A socket ended on a silent connection loss leaves a query still out on it unanswered.
+    fakeSock.groupMetadata.mockReturnValueOnce(new Promise(() => undefined));
+    void socketConfig().cachedGroupMetadata(GROUP);
+
+    jest.useFakeTimers();
+    fakeSock.fire('connection.update', {
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 515 } } },
+    });
+    await jest.runAllTimersAsync();
+    void socketConfig().cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
+    await adapter.destroy();
+  });
+
+  it.each([
+    ['disconnect', (a: BaileysAdapter) => a.disconnect()],
+    ['destroy', (a: BaileysAdapter) => a.destroy()],
+  ])('empties the cache on %s', async (_label, tearDown) => {
+    const adapter = await ready();
+    const { cachedGroupMetadata } = socketConfig();
+    await cachedGroupMetadata(GROUP);
+
+    await tearDown(adapter);
+    await cachedGroupMetadata(GROUP);
+
+    expect(fakeSock.groupMetadata).toHaveBeenCalledTimes(2);
   });
 });

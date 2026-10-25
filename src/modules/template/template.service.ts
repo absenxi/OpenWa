@@ -35,7 +35,9 @@ export class TemplateService {
     });
 
     try {
-      const saved = await this.templateRepository.save(template);
+      // No transaction of its own: on SQLite's single shared connection the rollback of the unique
+      // violation handled below would also discard what other callers wrote while it was open.
+      const saved = await this.templateRepository.save(template, { transaction: false });
       this.logger.log('Template created', { sessionId, templateId: saved.id, name: saved.name });
       return saved;
     } catch (err) {
@@ -99,7 +101,9 @@ export class TemplateService {
     if (dto.mediaUrl !== undefined) template.mediaUrl = dto.mediaUrl;
 
     try {
-      return await this.templateRepository.save(template);
+      // No transaction of its own: on SQLite's single shared connection the rollback of the unique
+      // violation handled below would also discard what other callers wrote while it was open.
+      return await this.templateRepository.save(template, { transaction: false });
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new ConflictException(`A template named '${template.name}' already exists for this session`);

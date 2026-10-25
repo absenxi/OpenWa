@@ -1,9 +1,25 @@
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, CircleDashed, Loader2, Megaphone, Plus, Search } from 'lucide-react';
+import {
+  AlertCircle,
+  Archive,
+  ArrowLeft,
+  BellOff,
+  CircleDashed,
+  Loader2,
+  Megaphone,
+  MessageSquarePlus,
+  Pin,
+  Plus,
+  Search,
+} from 'lucide-react';
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { Channel, Chat, ContactStatusGroup, Session } from '../../services/api';
 import { useRole } from '../../hooks/useRole';
+import { CHAT_LIST_FILTERS, type ChatListFilter } from '../../utils/chatFilters';
 import ChatAvatar from './ChatAvatar';
+import ChatRowMenu from './ChatRowMenu';
+import type { ChatRowActions } from './chatActionItems';
 
 export type ChatsTab = 'chats' | 'channels' | 'status';
 
@@ -17,9 +33,21 @@ interface ChatSidebarProps {
   onSearchQueryChange: (query: string) => void;
   onComposeStatus: () => void;
   formatChatTime: (timestamp?: number) => string;
+  /** Opens the new-chat panel; absent for a key that cannot write. */
+  onNewChat?: () => void;
+  /** The new-chat panel, rendered in place of the lists while it is open. */
+  newChatPanel?: ReactNode;
   chatsTab: {
     loading: boolean;
+    /** Set when the filter in use cannot be decided because the address book could not be read. */
+    filterError?: { retrying: boolean; onRetry: () => void };
     chats: Chat[];
+    filter: ChatListFilter;
+    onFilterChange: (filter: ChatListFilter) => void;
+    /** The actions behind the chevron on a group or 1:1 row. */
+    rowActions?: ChatRowActions;
+    /** The archive: how many chats it holds, whether the list shows it, and the switch between the two. */
+    archive?: { count: number; showing: boolean; onToggle: () => void };
     activeChatId?: string;
     pictures?: Record<string, string | null>;
     onSelectChat: (chat: Chat) => void;
@@ -53,6 +81,8 @@ function ChatSidebar({
   onSearchQueryChange,
   onComposeStatus,
   formatChatTime,
+  onNewChat,
+  newChatPanel,
   chatsTab,
   channelsTab,
   statusTab,
@@ -105,6 +135,12 @@ function ChatSidebar({
               {formatLastMessageSnippet(chat) ||
                 (!chat.timestamp && <span className="no-message">{t('chats.noMessageYet')}</span>)}
             </span>
+            {(chat.muted || chat.pinned) && (
+              <span className="chat-item-flags">
+                {chat.muted && <BellOff size={14} role="img" aria-label={t('chats.rowActions.mutedLabel')} />}
+                {chat.pinned && <Pin size={14} role="img" aria-label={t('chats.rowActions.pinnedLabel')} />}
+              </span>
+            )}
             {/* A negative count is a chat marked unread (Baileys reports -1): a badge with no number. */}
             {chat.unreadCount < 0 ? (
               <span
@@ -126,6 +162,10 @@ function ChatSidebar({
       </div>
     );
   };
+
+  if (newChatPanel) {
+    return <aside className="chats-sidebar">{newChatPanel}</aside>;
+  }
 
   return (
     <aside className="chats-sidebar">
@@ -165,16 +205,46 @@ function ChatSidebar({
           ))}
         </div>
 
-        {/* Search bar */}
-        <div className="chat-search-input">
-          <Search size={18} />
-          <input
-            type="text"
-            placeholder={t('chats.searchPlaceholder')}
-            value={searchQuery}
-            onChange={e => onSearchQueryChange(e.target.value)}
-          />
+        {/* Search bar, and the New chat button beside it */}
+        <div className="chat-search-row">
+          <div className="chat-search-input">
+            <Search size={18} />
+            <input
+              type="text"
+              placeholder={t('chats.searchPlaceholder')}
+              value={searchQuery}
+              onChange={e => onSearchQueryChange(e.target.value)}
+            />
+          </div>
+          {onNewChat && (
+            <button
+              type="button"
+              className="icon-btn chat-new-button"
+              onClick={onNewChat}
+              title={t('chats.newChat.title')}
+              aria-label={t('chats.newChat.title')}
+            >
+              <MessageSquarePlus size={20} />
+            </button>
+          )}
         </div>
+
+        {/* Quick filters over the chat list. Toggle buttons, not tabs: the tab bar above already is one. */}
+        {activeTab === 'chats' && (
+          <div className="chat-filters" role="group" aria-label={t('chats.filters.label')}>
+            {CHAT_LIST_FILTERS.map(filter => (
+              <button
+                key={filter}
+                type="button"
+                aria-pressed={chatsTab.filter === filter}
+                className={`chat-filter-pill ${chatsTab.filter === filter ? 'active' : ''}`}
+                onClick={() => chatsTab.onFilterChange(filter)}
+              >
+                {t(`chats.filters.${filter}`)}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Compose a new status — only meaningful on the Status tab. */}
         {activeTab === 'status' && canWrite && (
@@ -188,17 +258,60 @@ function ChatSidebar({
       {/* Chat list */}
       {activeTab === 'chats' && (
         <div className="chats-list">
+          {/* The archive's entry heads the list, and its view says where it is and leads back. */}
+          {!chatsTab.loading && chatsTab.archive && (chatsTab.archive.showing || chatsTab.archive.count > 0) && (
+            <button type="button" className="chat-archive-entry" onClick={chatsTab.archive.onToggle}>
+              {chatsTab.archive.showing ? <ArrowLeft size={18} /> : <Archive size={18} />}
+              <span>
+                {chatsTab.archive.showing ? t('chats.rowActions.archivedTitle') : t('chats.rowActions.archivedEntry')}
+              </span>
+              {!chatsTab.archive.showing && <span className="chat-archive-count">{chatsTab.archive.count}</span>}
+            </button>
+          )}
           {chatsTab.loading ? (
             <div className="chats-list-loading">
               <Loader2 className="animate-spin" size={24} />
               <span>{t('chats.loadingChats')}</span>
             </div>
+          ) : chatsTab.filterError ? (
+            <div className="chats-list-empty">
+              <AlertCircle size={24} className="text-warn" />
+              <span>{t('chats.newChat.contactsError')}</span>
+              {/* aria-disabled, not disabled, so the keyboard stays on the button while the read runs; Chats.css dims it. */}
+              <button
+                type="button"
+                className="btn-secondary"
+                aria-disabled={chatsTab.filterError.retrying}
+                aria-busy={chatsTab.filterError.retrying}
+                onClick={() => {
+                  if (!chatsTab.filterError?.retrying) chatsTab.filterError?.onRetry();
+                }}
+              >
+                {chatsTab.filterError.retrying && <Loader2 className="animate-spin" size={16} />}
+                {t('common.retry')}
+              </button>
+            </div>
           ) : chatsTab.chats.length === 0 ? (
             <div className="chats-list-empty">
-              <span>{t('chats.empty')}</span>
+              <span>
+                {chatsTab.archive?.showing
+                  ? t('chats.rowActions.archiveEmpty')
+                  : chatsTab.filter === 'all'
+                    ? t('chats.empty')
+                    : t('chats.noFilterResults')}
+              </span>
             </div>
           ) : (
-            chatsTab.chats.map(renderChatRow)
+            chatsTab.chats.map(chat =>
+              chatsTab.rowActions && (chat.kind === 'group' || chat.kind === 'individual') ? (
+                <div key={chat.id} className="chat-item-wrap has-menu">
+                  {renderChatRow(chat)}
+                  <ChatRowMenu chat={chat} actions={chatsTab.rowActions} />
+                </div>
+              ) : (
+                renderChatRow(chat)
+              ),
+            )
           )}
         </div>
       )}

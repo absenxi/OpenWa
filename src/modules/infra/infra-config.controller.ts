@@ -10,14 +10,20 @@ import {
   HttpStatus,
   Optional,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { InfraConfigResponseDto, InfraConfigSaveResponseDto, InfraRestartResponseDto } from './dto/infra-response.dto';
-import { IsArray, IsOptional, IsString } from 'class-validator';
+import { RestartDto } from './dto/restart.dto';
 import { RequireRole, RequireUnscopedKey } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
 import { writeSecretFile } from '../../common/utils/secret-file';
 import { EngineFactory } from '../../engine/engine.factory';
-import { DockerService, MANAGED_DOCKER_PROFILES } from '../docker';
+import {
+  BUNDLED_SERVICE_ENV,
+  DockerService,
+  MANAGED_DOCKER_PROFILES,
+  hostPinnedElsewhere,
+  namesBundledContainer,
+} from '../docker';
 import { ShutdownService } from '../../common/services/shutdown.service';
 import { createLogger } from '../../common/services/logger.service';
 import { AuditService } from '../audit/audit.service';
@@ -25,10 +31,12 @@ import { AuditAction } from '../audit/entities/audit-log.entity';
 import { SaveConfigDto } from './dto/save-config.dto';
 import { assertNoDefaultSecretsInProduction } from '../../config/bootstrap-security';
 import { BLANK_SHADOWED_ENV_KEYS, isEnvPinned, isOsProvidedEnv } from '../../config/env-precedence';
+import { resolveStorageRoot } from '../../config/storage-root';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { encodeGeneratedEnvValue, generatedEnvPath, readGeneratedEnv } from './generated-env';
+import { savedBuiltInMode } from './saved-builtin-mode';
 import {
   applyDatabaseSection,
   applyEngineSection,
@@ -37,31 +45,11 @@ import {
   ConfigSectionContext,
 } from './config-sections';
 
-// The PUT /infra/config body DTOs live in ./dto/save-config.dto.ts: as *.dto.ts classes they are
-// covered by the input-coercion drift gate (src/common/utils/dto-strict-coercion.spec.ts), which
-// controller-local classes escape, and their boolean/numeric fields carry the @ToStrictBoolean /
-// @ToStrictNumber transforms that keep a form-encoded 'false' from being coerced to `true`.
-
-class RestartDto {
-  @ApiPropertyOptional({ type: [String] })
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  profiles?: string[];
-
-  @ApiPropertyOptional({ type: [String] })
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  profilesToRemove?: string[];
-}
-
-// The env key and value that point the app at each bundled service, as /infra/status detects them.
-const BUNDLED_SERVICE_ENV: Record<string, [string, string]> = {
-  postgres: ['DATABASE_HOST', 'postgres'],
-  redis: ['REDIS_HOST', 'redis'],
-  minio: ['S3_ENDPOINT', 'http://minio:9000'],
-};
+// The PUT /infra/config body DTOs live in ./dto/save-config.dto.ts and the restart body in
+// ./dto/restart.dto.ts: as *.dto.ts classes they are covered by the input-coercion drift gate
+// (src/common/utils/dto-strict-coercion.spec.ts), which controller-local classes escape, and their
+// boolean/numeric fields carry the @ToStrictBoolean / @ToStrictNumber transforms that keep a form-encoded
+// 'false' from being coerced to `true`.
 
 // Saved infrastructure config returned to the dashboard form for hydration. Secret
 // values are never echoed back — a `*Set` boolean indicates whether one is stored.
@@ -69,6 +57,7 @@ interface SavedConfigResponse {
   database: {
     type: 'sqlite' | 'postgres';
     builtIn: boolean;
+    builtInSet: boolean;
     host: string;
     port: string;
     username: string;
@@ -79,11 +68,12 @@ interface SavedConfigResponse {
     sslRejectUnauthorized: boolean;
     passwordSet: boolean;
   };
-  redis: { enabled: boolean; builtIn: boolean; host: string; port: string; passwordSet: boolean };
+  redis: { enabled: boolean; builtIn: boolean; builtInSet: boolean; host: string; port: string; passwordSet: boolean };
   queue: { enabled: boolean };
   storage: {
     type: 'local' | 's3';
     builtIn: boolean;
+    builtInSet: boolean;
     localPath: string;
     s3Bucket: string;
     s3Region: string;
@@ -140,7 +130,7 @@ export class InfraConfigController {
     return {
       database: {
         type: effective('DATABASE_TYPE') === 'postgres' ? 'postgres' : 'sqlite',
-        builtIn: effective('POSTGRES_BUILTIN') === 'true',
+        ...savedBuiltInMode('database', saved),
         host: effective('DATABASE_HOST') || '',
         port: effective('DATABASE_PORT') || '',
         username: effective('DATABASE_USERNAME') || '',
@@ -153,7 +143,7 @@ export class InfraConfigController {
       },
       redis: {
         enabled: effective('REDIS_ENABLED') === 'true',
-        builtIn: effective('REDIS_BUILTIN') === 'true',
+        ...savedBuiltInMode('redis', saved),
         host: effective('REDIS_HOST') || '',
         port: effective('REDIS_PORT') || '',
         passwordSet: Boolean(effective('REDIS_PASSWORD')),
@@ -161,7 +151,7 @@ export class InfraConfigController {
       queue: { enabled: effective('QUEUE_ENABLED') === 'true' },
       storage: {
         type: effective('STORAGE_TYPE') === 's3' ? 's3' : 'local',
-        builtIn: effective('MINIO_BUILTIN') === 'true',
+        ...savedBuiltInMode('storage', saved),
         localPath: effective('STORAGE_LOCAL_PATH') || '',
         s3Bucket: effective('S3_BUCKET') || '',
         s3Region: effective('S3_REGION') || '',
@@ -192,7 +182,8 @@ export class InfraConfigController {
     status: 400,
     description:
       'Rejected before anything was written: an invalid or unknown field, an unknown engine type, a value with a ' +
-      'line break or one that cannot be stored, or a configuration that would not boot in production.',
+      'line break or one that cannot be stored, a configuration that would not boot in production, or a media ' +
+      'storage path the app cannot write to.',
   })
   @ApiBody({ description: 'Configuration to save', type: SaveConfigDto })
   saveConfig(@Body() config: SaveConfigDto): { message: string; saved: boolean; envPath: string; profiles: string[] } {
@@ -220,6 +211,7 @@ export class InfraConfigController {
       this.assertNoLineBreakValues(updates);
       const merged = this.mergeWithExisting(existing, ctx);
       this.assertProductionBootable(merged);
+      this.assertStorageRootWritable(updates, merged);
       this.persistGeneratedEnv(envPath, merged);
       this.auditConfigSaved(config, profiles);
 
@@ -254,12 +246,13 @@ export class InfraConfigController {
     }
 
     // Redis and queue are independent sections: a payload carrying only one of them must
-    // not rewrite (or disable) the other's saved keys.
-    if (config.redis) {
-      applyRedisSection(config.redis, existing, ctx);
-    }
+    // not rewrite (or disable) the other's saved keys. The queue goes first because it reaches Redis
+    // too, and the Redis section reads its new switch.
     if (config.queue) {
       if (config.queue.enabled !== undefined) updates.QUEUE_ENABLED = config.queue.enabled ? 'true' : 'false';
+    }
+    if (config.redis) {
+      applyRedisSection(config.redis, existing, ctx);
     }
 
     if (config.storage) {
@@ -293,30 +286,27 @@ export class InfraConfigController {
     return merged;
   }
 
-  private assertProductionBootable(merged: Record<string, string>): void {
-    // Save-time production guard. The file is loaded on the NEXT boot, which may run with
-    // NODE_ENV=production regardless of this process's environment — so evaluate the merged
-    // result with the very same boot guard (as production) and refuse the save when that boot
-    // would refuse to start. This is what stops a built-in->external flip with no fresh
-    // credentials from persisting a config that crash-loops the next production boot.
-    // Evaluate what that boot would actually SEE, not just what the file holds: load-env.ts
-    // loads with dotenv override:false, so a value supplied via the container environment
-    // (compose `environment:`) wins over this file — the precedence the file header documents.
-    // Without that, a deployment providing DATABASE_PASSWORD & co. through the environment is
-    // refused on EVERY save even though its boot passes the guard. A pinned blank is kept as-is:
-    // clearBlankEnv drops blank host forwards before either snapshot, so a blank that is still
-    // pinned is a `KEY=` line in ./.env, and boot keeps it. Only without a snapshot (a process that
-    // never ran load-env) does a blank on a blank-forwarded key count as unset, as clearBlankEnv would.
-    //
-    // Only a key from a layer ABOVE the file may win: the host, or the project .env, which load-env
-    // also loads ahead of data/.env.generated with override:false. load-env merges the generated
-    // file into process.env too, so reading process.env alone would hand back the very file this
-    // save is replacing: the guard would then bless a flip by validating the OLD config (a
-    // built-in -> external switch keeping the bundled 'openwa' password would save cleanly and
-    // crash-loop the next production boot, the exact case this guard exists for). isEnvPinned's
-    // snapshot is taken before that file loads; isOsProvidedEnv keeps the no-snapshot default of
-    // assuming an override.
-    const bootValue = (key: string): string | undefined => {
+  // The value the next boot reads for `key`, so the save-time guards judge what it will see.
+  //
+  // Evaluate what that boot would actually SEE, not just what the file holds: load-env.ts
+  // loads with dotenv override:false, so a value supplied via the container environment
+  // (compose `environment:`) wins over this file — the precedence the file header documents.
+  // Without that, a deployment providing DATABASE_PASSWORD & co. through the environment is
+  // refused on EVERY save even though its boot passes the guard. A pinned blank is kept as-is:
+  // clearBlankEnv drops blank host forwards before either snapshot, so a blank that is still
+  // pinned is a `KEY=` line in ./.env, and boot keeps it. Only without a snapshot (a process that
+  // never ran load-env) does a blank on a blank-forwarded key count as unset, as clearBlankEnv would.
+  //
+  // Only a key from a layer ABOVE the file may win: the host, or the project .env, which load-env
+  // also loads ahead of data/.env.generated with override:false. load-env merges the generated
+  // file into process.env too, so reading process.env alone would hand back the very file this
+  // save is replacing: the guard would then bless a flip by validating the OLD config (a
+  // built-in -> external switch keeping the bundled 'openwa' password would save cleanly and
+  // crash-loop the next production boot, the exact case this guard exists for). isEnvPinned's
+  // snapshot is taken before that file loads; isOsProvidedEnv keeps the no-snapshot default of
+  // assuming an override.
+  private bootValueReader(merged: Record<string, string>): (key: string) => string | undefined {
+    return (key: string): string | undefined => {
       if (isEnvPinned(key) && process.env[key] !== undefined) return process.env[key];
       const envValue = isOsProvidedEnv(key) ? process.env[key] : undefined;
       if (envValue !== undefined && (envValue.trim() !== '' || !BLANK_SHADOWED_ENV_KEYS.includes(key))) {
@@ -324,6 +314,15 @@ export class InfraConfigController {
       }
       return merged[key];
     };
+  }
+
+  // Save-time production guard. The file is loaded on the NEXT boot, which may run with
+  // NODE_ENV=production regardless of this process's environment — so evaluate the merged
+  // result with the very same boot guard (as production) and refuse the save when that boot
+  // would refuse to start. This is what stops a built-in->external flip with no fresh
+  // credentials from persisting a config that crash-loops the next production boot.
+  private assertProductionBootable(merged: Record<string, string>): void {
+    const bootValue = this.bootValueReader(merged);
     try {
       assertNoDefaultSecretsInProduction({
         nodeEnv: 'production',
@@ -343,6 +342,26 @@ export class InfraConfigController {
       const detail = error instanceof Error ? error.message : String(error);
       throw new BadRequestException(
         `Refusing to save a configuration that would be rejected at production boot. ${detail}`,
+      );
+    }
+  }
+
+  // A storage path the app cannot create or write is refused by the next boot before Nest builds, which
+  // crash-loops the instance with the dashboard that could undo the save down. Only a path this save
+  // names is judged, and only when the boot will read it: a value the host or the project .env pins
+  // outranks the file, so the submitted one never reaches the boot. The probe is the boot's own, so the
+  // fossil `./uploads` it tolerates is tolerated here too. It names the submitted value only, not the
+  // absolute path it resolves to, as the save response does not disclose the host's layout.
+  private assertStorageRootWritable(updates: Record<string, string>, merged: Record<string, string>): void {
+    const submitted = updates.STORAGE_LOCAL_PATH;
+    if (submitted === undefined || this.bootValueReader(merged)('STORAGE_LOCAL_PATH') !== submitted) return;
+    try {
+      resolveStorageRoot({ configured: submitted });
+    } catch {
+      throw new BadRequestException(
+        `Refusing to save the storage path '${submitted}': the app cannot create or write it, and the next start ` +
+          'would refuse to boot. Use a directory the app user owns, inside the data volume when running in ' +
+          'Docker (for example ./data/media).',
       );
     }
   }
@@ -419,17 +438,32 @@ export class InfraConfigController {
     orchestration?: object;
     removal?: object;
   }> {
-    const profiles = body?.profiles || [];
-    // Never stop a bundled service the environment pins the app to (e.g. the documented manual
-    // built-in Postgres with DATABASE_HOST=postgres in .env): that pin outranks the saved config, so
-    // the restarted app would still point at the container and fail to boot.
-    const pinnedToBundled = Object.entries(BUNDLED_SERVICE_ENV)
-      .filter(([, [key, value]]) => isEnvPinned(key) && process.env[key] === value)
-      .map(([profile]) => profile);
+    // Never start a bundled service whose host the environment pins elsewhere: the pin outranks the saved file, so
+    // the next boot dials the pinned host and the container would run with nothing using it.
+    const requestedStart = body?.profiles || [];
+    const pinnedElsewhere = requestedStart.filter(p => hostPinnedElsewhere(p));
+    const profiles = requestedStart.filter(p => !pinnedElsewhere.includes(p));
+    if (pinnedElsewhere.length > 0) {
+      this.logger.warn('Not starting profiles whose host the environment pins elsewhere', { pinnedElsewhere });
+    }
+    // Never stop a bundled service the NEXT boot still dials, whatever the page asked for: the restarted
+    // app would point at a stopped container and fail to boot, with the dashboard that could undo it. The
+    // host it dials is the one the environment pins (e.g. the documented manual built-in Postgres with
+    // DATABASE_HOST=postgres in .env, which outranks the saved config), else the one in the saved file,
+    // which already holds the save that precedes this restart. Any spelling that reaches the container counts (the
+    // container name, another letter case). A host moved away from the bundled name still stops its container.
+    let saved: Record<string, string> | undefined;
+    const dialsBundled = (profile: string): boolean => {
+      const bundled = BUNDLED_SERVICE_ENV[profile];
+      if (!bundled) return false;
+      const [key] = bundled;
+      return namesBundledContainer(profile, isEnvPinned(key) ? process.env[key] : (saved ??= readGeneratedEnv())[key]);
+    };
     const requestedRemoval = body?.profilesToRemove || [];
-    const profilesToRemove = requestedRemoval.filter(p => !pinnedToBundled.includes(p));
-    if (profilesToRemove.length < requestedRemoval.length) {
-      this.logger.warn('Keeping profiles the environment pins the app to', { pinnedToBundled });
+    const keptRunning = requestedRemoval.filter(dialsBundled);
+    const profilesToRemove = requestedRemoval.filter(p => !keptRunning.includes(p));
+    if (keptRunning.length > 0) {
+      this.logger.warn('Keeping profiles the next boot still dials', { keptRunning });
     }
     let orchestrationResult: object | undefined;
     // Teardown is stop-only (see DockerService.stopManagedService): containers are stopped and
@@ -445,9 +479,11 @@ export class InfraConfigController {
       // (re)start. We deliberately do NOT infer teardown from the saved *_BUILTIN flag: the default
       // data/.env.generated carries POSTGRES_BUILTIN=false, so a bare compose-profile restart would
       // otherwise tear down the very backend the app is running on. The dashboard fills this list from the
-      // live /infra/status builtIn flags at save time (running minus the new profiles). A container is
-      // left running when that status read had failed, or when an environment pin keeps the app on it
-      // (dropped above).
+      // live /infra/status at save time: the builtIn services minus the new profiles, plus a running container
+      // OpenWA created whose host the environment pins elsewhere, less any whose next-boot host (the pinned one,
+      // else the saved config read back, else the one the save sent when that read fails) still reaches it, and
+      // less any whose host it cannot tell. A container is left running when that status read had failed, or when
+      // the next boot still dials it (dropped above).
       // Only ever tear down OpenWA-managed services. An arbitrary profile name (or the empty string)
       // would otherwise reach stopManagedService and, via container-name matching, could stop an unrelated
       // container — so constrain teardown to the managed allowlist and drop anything else.

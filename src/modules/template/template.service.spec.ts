@@ -178,6 +178,7 @@ describe('TemplateService', () => {
 
       expect(repository.save).toHaveBeenCalledWith(
         expect.objectContaining({ body: 'Updated body', name: template.name }),
+        { transaction: false },
       );
     });
 

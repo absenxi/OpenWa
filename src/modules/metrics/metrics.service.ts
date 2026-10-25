@@ -117,17 +117,12 @@ export class MetricsService implements OnModuleDestroy {
       throw new HttpException('Too many failed metrics token attempts', HttpStatus.TOO_MANY_REQUESTS);
     }
     const provided = (authorizationHeader ?? '').replace(/^Bearer\s+/i, '').trim();
-    if (!provided || !this.safeEqual(provided, expected)) {
+    // Length-hiding constant-time compare, so the expected token's byte-length is not leaked through a fast
+    // length-mismatch return: this `/api/metrics` endpoint is @Public and timed by callers.
+    if (!provided || !constantTimeEqual(provided, expected)) {
       throw new UnauthorizedException('Invalid metrics token');
     }
     this.failedScrapeLimiter.refund(subject);
-  }
-
-  private safeEqual(a: string, b: string): boolean {
-    // Length-hiding constant-time compare: hash both inputs with a per-process key (fixed-length
-    // digests) then timingSafeEqual, so the expected token's byte-length is not leaked through a
-    // fast length-mismatch return. This `/api/metrics` endpoint is @Public and timed by callers.
-    return constantTimeEqual(a, b);
   }
 
   /** Render the current metrics in Prometheus text exposition format (memoized for a short TTL). */
@@ -226,7 +221,7 @@ export class MetricsService implements OnModuleDestroy {
     }
 
     lines.push(
-      '# HELP openwa_webhook_delivery_failures_total Webhook delivery failures recorded since process start: retries exhausted, never sent (shed, refused at shutdown, rejected before sending), or stopped by shutdown between direct retries.',
+      '# HELP openwa_webhook_delivery_failures_total Webhook delivery failures recorded since process start: retries exhausted, never sent (shed, refused at shutdown, rejected before sending, or an opt-in event dropped past the bound of its webhook), or stopped by shutdown between direct retries.',
     );
     lines.push('# TYPE openwa_webhook_delivery_failures_total counter');
     lines.push(`openwa_webhook_delivery_failures_total ${getWebhookDeliveryFailuresTotal()}`);

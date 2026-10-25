@@ -9,13 +9,13 @@ import { MessageProjector } from '../session/message-projector.service';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
-import { assertBase64WithinMediaCap, stripBase64DataUri } from './media-cap.util';
+import { resolveMediaBody } from './media-cap.util';
 import { MediaInput, IWhatsAppEngine, MessageResult } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager, applySendingGate } from '../../core/hooks';
-import { SendPacingService, countsTowardSendBreaker } from './send-pacing.service';
+import { SendPacingService, SettleAdmission, countsTowardSendBreaker } from './send-pacing.service';
 import { TemplateService } from '../template/template.service';
-import { renderTemplate } from '../../common/utils/template-render';
+import { renderedLength, renderTemplate, TemplateRenderError } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
 import { SsrfBlockedError, SSRF_BLOCKED_CLIENT_MESSAGE } from '../../common/security/ssrf-guard';
 import { resolveFeatureFlags } from '../../config/feature-flags';
@@ -23,7 +23,7 @@ import { isUniqueViolation } from '../../common/utils/db-errors';
 import { ChatMediaArchiveService } from '../chat-media/chat-media-archive.service';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { resolveJidCandidates } from '../../engine/identity/jid-candidates';
-import { isMediaUrl, MEDIA_URL_MESSAGE } from '../../common/media/media-url';
+import { captureSessionWrites, SessionWriteScope } from '../../common/utils/session-write-scope';
 
 /** Default cap on a rendered template's final text; overridable via TEMPLATE_RENDER_MAX_CHARS. */
 export const DEFAULT_TEMPLATE_RENDER_MAX_CHARS = 64 * 1024;
@@ -120,7 +120,7 @@ export class MessageSendService {
       body: finalDto.text,
       type: 'text',
       quotedMessageId: finalDto.quotedMessageId,
-    });
+    }));
 
     // Opt-in humanising "typing…" pause before the actual send (anti-automation signal).
     await this.simulateTypingIfEnabled(engine, finalDto.chatId, finalDto.text);
@@ -247,7 +247,8 @@ export class MessageSendService {
    *
    * The FINAL rendered text is capped at template.renderMaxChars (default 64 KiB): caller-supplied
    * variables can inflate a small template unboundedly, so an over-cap render is rejected with a
-   * 400 naming the limit rather than truncated silently or pushed to the engine/DB as-is.
+   * 400 naming the limit rather than truncated silently or pushed to the engine/DB as-is. The length
+   * is measured before anything is rendered, so a refused request never allocates the oversized text.
    */
   async sendTemplate(sessionId: string, dto: SendTemplateMessageDto): Promise<MessageResponseDto> {
     const template = await this.templateService.resolve(sessionId, {
@@ -256,18 +257,28 @@ export class MessageSendService {
     });
 
     const vars = dto.vars ?? {};
-    const segments = [template.header, template.body, template.footer]
-      .filter((segment): segment is string => segment != null && segment.length > 0)
-      .map(segment => renderTemplate(segment, vars));
-    const text = segments.join('\n\n');
+    const parts = [template.header, template.body, template.footer].filter(
+      (segment): segment is string => segment != null && segment.length > 0,
+    );
+    const separator = '\n\n';
 
     const maxChars =
       this.configService?.get<number>('template.renderMaxChars', DEFAULT_TEMPLATE_RENDER_MAX_CHARS) ??
       DEFAULT_TEMPLATE_RENDER_MAX_CHARS;
-    if (text.length > maxChars) {
-      throw new BadRequestException(
-        `Rendered template is ${text.length} characters, over the ${maxChars}-character limit`,
-      );
+    let text: string;
+    try {
+      const length =
+        parts.reduce((sum, part) => sum + renderedLength(part, vars), 0) +
+        separator.length * Math.max(0, parts.length - 1);
+      if (length > maxChars) {
+        throw new BadRequestException(
+          `Rendered template is ${length} characters, over the ${maxChars}-character limit`,
+        );
+      }
+      text = parts.map(part => renderTemplate(part, vars)).join(separator);
+    } catch (error) {
+      if (error instanceof TemplateRenderError) throw new BadRequestException(error.message);
+      throw error;
     }
 
     if (template.type === 'image') {
@@ -363,8 +374,7 @@ export class MessageSendService {
       metadata: {
         media: { mimetype: audioDto.mimetype, filename: finalDto.filename, data: media.data },
       },
-      quotedMessageId: finalDto.quotedMessageId,
-    });
+    );
 
     let result: MessageResult;
     try {
@@ -420,7 +430,7 @@ export class MessageSendService {
       body: `📍 ${finalDto.description || 'Location'}`,
       type: 'location',
       quotedMessageId: finalDto.quotedMessageId,
-    });
+    }));
 
     let result: MessageResult;
     try {
@@ -450,7 +460,7 @@ export class MessageSendService {
       body: `📇 ${finalDto.contactName}`,
       type: 'contact',
       quotedMessageId: finalDto.quotedMessageId,
-    });
+    }));
 
     let result: MessageResult;
     try {
@@ -486,7 +496,7 @@ export class MessageSendService {
         },
       },
       quotedMessageId: finalDto.quotedMessageId,
-    });
+    }));
 
     let result: MessageResult;
     try {
@@ -579,7 +589,7 @@ export class MessageSendService {
         quotedMessage: { id: finalDto.messageId, body: promptBody },
         button: { id: finalDto.buttonId, text: finalDto.text },
       },
-    });
+    );
 
     let result: MessageResult;
     try {
@@ -596,7 +606,13 @@ export class MessageSendService {
         button: { id: finalDto.buttonId, text: result.body },
       };
     }
-    return this.persistSentState(message, result);
+    return this.persistSentState(
+      message,
+      result,
+      result.body
+        ? { body: result.body, metadata: message.metadata as QueryDeepPartialEntity<Record<string, unknown>> }
+        : undefined,
+    );
   }
 
   async forward(
@@ -611,7 +627,7 @@ export class MessageSendService {
       chatId: finalDto.toChatId,
       body: '[Forwarded]',
       type: 'forward',
-    });
+    }));
 
     let result: MessageResult;
     try {
@@ -678,70 +694,87 @@ export class MessageSendService {
    * failing, mirroring `persistSentState`: the echo carries only what the engine reported (for a
    * Baileys API send, a media-less marker), so dropping this write would lose the media payload.
    */
-  async saveOutgoingMessage(sessionId: string, data: SaveOutgoingMessageData): Promise<Message> {
-    const session = await this.sessionService.findOne(sessionId);
-    // Resolved here rather than in each sender: reply and click-button build their own
-    // `metadata.quotedMessage` and never reach this branch, so every OTHER quoting sender (media,
-    // location, contact, poll, quoted text) used to persist an id with an empty body and the
-    // dashboard drew a blank quote box above the message.
-    const quotedMessage = data.quotedMessageId
-      ? { id: data.quotedMessageId, body: await this.resolveQuotedBody(sessionId, data.quotedMessageId) }
-      : undefined;
-    const message = this.messageRepository.create({
-      sessionId,
-      // An engine that sent a message but could not read its id back reports an empty id (see the
-      // whatsapp-web.js adapter's `toMessageResult`). Store NULL rather than '': the
-      // (sessionId, waMessageId) unique index is not partial, so a second id-less send in the same
-      // session collides on '' while NULLs stay exempt — and in the bulk path that violation is
-      // swallowed into a warning, losing the row silently. Normalizing at this one chokepoint covers
-      // every caller instead of relying on each to remember.
-      waMessageId: data.waMessageId || undefined,
-      chatId: data.chatId,
-      from: session?.phone || 'me',
-      to: data.chatId,
-      body: data.body,
-      type: data.type,
-      direction: MessageDirection.OUTGOING,
-      timestamp: data.timestamp,
-      status: data.status ?? MessageStatus.PENDING,
-      metadata: quotedMessage ? { ...data.metadata, quotedMessage } : data.metadata,
-    });
-    const saved = await this.messageRepository.save(message).catch(async (err: unknown) => {
-      const waMessageId = message.waMessageId;
-      if (!waMessageId || !isUniqueViolation(err)) throw err;
-      // No `status` here on purpose. The row this collides with is the own-send echo's, inserted
-      // SENT, and the ack path advances it forward-only (ackStatusTransitionFrom). This write only
-      // ever carries PENDING or SENT, so it can never be an upgrade: it is a no-op, or it drags a
-      // DELIVERED/READ row back to SENT when an ack won the race. Leave the delivery state to the
-      // one writer that owns it.
-      const patch: QueryDeepPartialEntity<Message> = {
-        timestamp: message.timestamp,
-      };
-      // Only when this write actually carries metadata worth merging: a text item must not blank
-      // the echo's, and a URL pointer must not replace bytes the engine already downloaded.
-      const metadata = message.metadata;
-      if (metadata && !isUrlPointerMetadata(metadata)) {
-        try {
-          await updateMessageMetadata(this.messageRepository, { sessionId, waMessageId }, current =>
-            mergeSentMetadata(current, metadata),
-          );
-        } catch (error) {
-          if (message.status !== MessageStatus.SENT) throw error;
-          this.logger.warn(`Merging sent metadata onto the echo row failed (id=${waMessageId})`, {
-            error: error instanceof Error ? error.message : String(error),
-          });
-          // The bulk engine has already sent this item. Keep its media in an id-less SENT row
-          // when the echo cannot accept it, instead of losing the only payload-bearing copy.
-          return this.messageRepository.save(this.messageRepository.create({ ...message, waMessageId: undefined }));
-        }
-      }
-      if (message.timestamp !== undefined) await this.messageRepository.update({ sessionId, waMessageId }, patch);
-      const surviving = await this.messageRepository.findOne({ where: { sessionId, waMessageId } });
-      if (!surviving) throw err;
-      return surviving;
-    });
-    this.emitPersisted(sessionId, saved);
-    return saved;
+  async saveOutgoingMessage(
+    sessionId: string,
+    data: SaveOutgoingMessageData,
+    lifetime?: SessionWriteScope,
+  ): Promise<Message> {
+    const scope =
+      lifetime ?? captureSessionWrites(this.messageRepository.manager?.connection ?? this.messageRepository, sessionId);
+    try {
+      const session = await this.sessionService.findOne(sessionId);
+      // Resolved here rather than in each sender: reply and click-button build their own
+      // `metadata.quotedMessage` and never reach this branch, so every OTHER quoting sender (media,
+      // location, contact, poll, quoted text) used to persist an id with an empty body and the
+      // dashboard drew a blank quote box above the message.
+      const quotedMessage = data.quotedMessageId
+        ? { id: data.quotedMessageId, body: await this.resolveQuotedBody(sessionId, data.quotedMessageId) }
+        : undefined;
+      const message = this.messageRepository.create({
+        sessionId,
+        // An engine that sent a message but could not read its id back reports an empty id (see the
+        // whatsapp-web.js adapter's `toMessageResult`). Store NULL rather than '': the
+        // (sessionId, waMessageId) unique index is not partial, so a second id-less send in the same
+        // session collides on '' while NULLs stay exempt — and in the bulk path that violation is
+        // swallowed into a warning, losing the row silently. Normalizing at this one chokepoint covers
+        // every caller instead of relying on each to remember.
+        waMessageId: data.waMessageId || undefined,
+        chatId: data.chatId,
+        from: session?.phone || 'me',
+        to: data.chatId,
+        body: data.body,
+        type: data.type,
+        direction: MessageDirection.OUTGOING,
+        timestamp: data.timestamp,
+        status: data.status ?? MessageStatus.PENDING,
+        metadata: quotedMessage ? { ...data.metadata, quotedMessage } : data.metadata,
+      });
+      // No transaction of its own: the unique violation handled below is routine (the own-send echo wins the
+      // race), and on SQLite's single shared connection its rollback would discard what other callers wrote
+      // while it was open, after they were told it was stored.
+      const saved = await scope
+        .write(() => this.messageRepository.save(message, { transaction: false }))
+        .catch(async (err: unknown) => {
+          const waMessageId = message.waMessageId;
+          if (!waMessageId || !isUniqueViolation(err)) throw err;
+          // No `status` here on purpose. The row this collides with is the own-send echo's, inserted
+          // SENT, and the ack path advances it forward-only (ackStatusTransitionFrom). This write only
+          // ever carries PENDING or SENT, so it can never be an upgrade: it is a no-op, or it drags a
+          // DELIVERED/READ row back to SENT when an ack won the race. Leave the delivery state to the
+          // one writer that owns it.
+          const patch: QueryDeepPartialEntity<Message> = {
+            timestamp: message.timestamp,
+          };
+          // Only when this write actually carries metadata worth merging: a text item must not blank
+          // the echo's, and a URL pointer must not replace bytes the engine already downloaded.
+          const metadata = message.metadata;
+          if (metadata && !isUrlPointerMetadata(metadata)) {
+            try {
+              await updateMessageMetadata(this.messageRepository, { sessionId, waMessageId }, current =>
+                mergeSentMetadata(current, metadata),
+              );
+            } catch (error) {
+              if (message.status !== MessageStatus.SENT) throw error;
+              this.logger.warn(`Merging sent metadata onto the echo row failed (id=${waMessageId})`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              // The bulk engine has already sent this item. Keep its media in an id-less SENT row
+              // when the echo cannot accept it, instead of losing the only payload-bearing copy.
+              return scope.write(() =>
+                this.messageRepository.save(this.messageRepository.create({ ...message, waMessageId: undefined })),
+              );
+            }
+          }
+          if (message.timestamp !== undefined) await this.messageRepository.update({ sessionId, waMessageId }, patch);
+          const surviving = await this.messageRepository.findOne({ where: { sessionId, waMessageId } });
+          if (!surviving) throw err;
+          return surviving;
+        });
+      this.emitPersisted(sessionId, saved);
+      return saved;
+    } finally {
+      if (!lifetime) scope.close();
+    }
   }
 
   // Fire-and-forget: a plugin handler must never break the send path. The built-in FTS search provider
@@ -783,7 +816,14 @@ export class MessageSendService {
       delete media.data;
     }
     message.status = MessageStatus.FAILED;
-    await this.messageRepository.save(message);
+    const result = await this.messageRepository.update(
+      { id: message.id, sessionId: message.sessionId },
+      {
+        status: MessageStatus.FAILED,
+        metadata: message.metadata as QueryDeepPartialEntity<Record<string, unknown>>,
+      },
+    );
+    if (!result.affected) return;
     // Reconcile the earlier PENDING emission (#906): a provider must see the terminal FAILED state.
     this.emitPersisted(message.sessionId, message);
   }
@@ -794,7 +834,15 @@ export class MessageSendService {
    * DB fault would otherwise mark a delivered message permanently FAILED and (for text) fire
    * `message:failed`. Log and return success instead.
    */
-  private async persistSentState(message: Message, result: MessageResult): Promise<MessageResponseDto> {
+  private async persistSentState(
+    message: Message,
+    result: MessageResult,
+    // Columns a sender changed in memory after its PENDING insert. The write below is an UPDATE of
+    // fixed columns, so anything not listed here (the resolved button label, for one) is never stored.
+    // `metadata` is listed only when it changed: the insert already stored it, and a base64 media
+    // payload inside it would otherwise be written a second time on every send.
+    changed: Pick<QueryDeepPartialEntity<Message>, 'body' | 'metadata'> = {},
+  ): Promise<MessageResponseDto> {
     // A send whose engine couldn't read the sent message's id back reports an empty id — a forward that
     // can't recover the copy, or a WhatsApp Web build that renamed the id field out from under the
     // engine. Leave waMessageId unset (NULL) so no ack mis-matches it.
@@ -805,7 +853,28 @@ export class MessageSendService {
     message.status = MessageStatus.SENT;
     message.timestamp = result.timestamp;
     try {
-      await this.messageRepository.save(message);
+      // No transaction of its own, for the reason given at the first save of this message.
+      const sent: QueryDeepPartialEntity<Message> = {
+        ...changed,
+        waMessageId: message.waMessageId,
+        status: message.status,
+        timestamp: message.timestamp,
+      };
+      // Guarded on the row still being PENDING, so the common write carries no metadata. A row the pending
+      // reaper failed while the engine was still answering has lost its media payload and gained a marker:
+      // it is written again, unguarded, with the metadata the insert stored. No row at all means the
+      // session was deleted under this send.
+      let updated = await this.messageRepository.update(
+        { id: message.id, sessionId: message.sessionId, status: MessageStatus.PENDING },
+        sent,
+      );
+      if (!updated.affected) {
+        updated = await this.messageRepository.update(
+          { id: message.id, sessionId: message.sessionId },
+          { ...sent, metadata: message.metadata as QueryDeepPartialEntity<Record<string, unknown>> },
+        );
+      }
+      if (!updated.affected) return { messageId: result.id, timestamp: result.timestamp };
       // Reconcile the earlier PENDING emission with the finalized row (#906).
       this.emitPersisted(message.sessionId, message);
     } catch (persistError) {
@@ -842,11 +911,12 @@ export class MessageSendService {
         }
         if (!metadataMerged) {
           // Keep the payload-bearing row when the echo merge fails. Mark it SENT without the
-          // conflicting engine id so the pending reaper cannot strip successfully sent media.
+          // conflicting engine id so the pending reaper cannot strip successfully sent media. This is the
+          // row that survives, so it carries what the send resolved too (a clicked button's label).
           await this.messageRepository
             .update(
               { id: message.id, status: MessageStatus.PENDING },
-              { status: MessageStatus.SENT, timestamp: result.timestamp },
+              { status: MessageStatus.SENT, timestamp: result.timestamp, ...changed },
             )
             .catch(err =>
               this.logger.warn(`Preserving the sent media row failed (id=${message.id})`, {
@@ -931,31 +1001,14 @@ export class MessageSendService {
   }
 
   private buildMediaInput(dto: SendMediaMessageDto): MediaInput {
-    const base64 = stripBase64DataUri(dto.base64);
-    if (!dto.url && !base64) {
-      throw new BadRequestException('Either url or base64 must be provided');
-    }
-    // The DTO checks this too, but a plugin send and a message:sending rewrite reach here without it,
-    // and both engines decode anything that is not an http(s) URL as base64.
-    if (!base64 && !isMediaUrl(dto.url)) {
-      throw new BadRequestException(MEDIA_URL_MESSAGE);
-    }
-
-    if (base64 && !dto.mimetype) {
-      throw new BadRequestException('mimetype is required when using base64 data');
-    }
-
-    // Bound an outbound base64 payload to the same byte cap as URL/inbound media, before it is
-    // persisted or handed to the engine. URL media is already capped while streaming.
-    assertBase64WithinMediaCap(base64);
-
+    const { mimetype, data } = resolveMediaBody(dto, {
+      fallbackMimetype: 'application/octet-stream',
+      requireMimetypeForBase64: true,
+      checkUrl: true,
+    });
     return {
-      mimetype: dto.mimetype || 'application/octet-stream',
-      // base64 wins over url when both are present: it is the explicit local payload, and a stale
-      // `url` (e.g. a Swagger/example default left in the body) must not be fetched in its place.
-      // Aligns the send selection with the base64-first persisted metadata and the url field's check,
-      // which is skipped only when base64 holds data after its data-URI prefix is stripped (#670).
-      data: base64 || dto.url!,
+      mimetype,
+      data,
       filename: dto.filename,
       caption: dto.caption,
       mentions: dto.mentions,

@@ -158,7 +158,7 @@ export class GroupController {
 
   @ChatScoped('fenced')
   @Get(':groupId/settings')
-  @ApiOperation({ summary: 'Get group settings (announce / locked / ephemeral timer)' })
+  @ApiOperation({ summary: 'Get group settings (announce / locked / ephemeral timer / member-add mode)' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiResponse({ status: 200, description: 'Group settings', type: GroupSettingsResponseDto })
@@ -180,12 +180,18 @@ export class GroupController {
   @ChatScoped('fenced')
   @Put(':groupId/settings')
   @RequireRole(ApiKeyRole.OPERATOR)
-  @ApiOperation({ summary: 'Update group settings (announce / locked / ephemeral timer)' })
+  @ApiOperation({ summary: 'Update group settings (announce / locked / ephemeral timer / member-add mode)' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: GroupSettingsDto })
   @ApiResponse({ status: 200, description: 'Group settings updated', type: GroupAckResponseDto })
-  @ApiResponse({ status: 400, description: 'No setting provided, or a value is not a boolean' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'No setting provided, an unknown body field, or an invalid value: `announce` and `locked` take a boolean, ' +
+      '`ephemeralSeconds` an integer of 0 or more, `memberAddMode` `all` or `admins`, and `null` is refused. ' +
+      'Also answered when the session is not started (no engine is running for it).',
+  })
   @ApiResponse({ status: 403, description: 'The engine refused the change (the account is not a group admin)' })
   @ApiResponse({ status: 404, description: 'Group not found' })
   @ApiResponse({ status: 501, description: 'The active engine does not support a requested setting' })
@@ -543,8 +549,9 @@ export class GroupController {
   @ApiResponse({
     status: 400,
     description:
-      'The id does not name a group, the session is not active, neither url nor base64 was supplied, or ' +
-      'the url answers non-2xx, times out or cannot be reached',
+      'The id does not name a group, the session is not active, neither url nor base64 was supplied, ' +
+      'the url answers non-2xx, times out or cannot be reached, or the image cannot be read (Baileys ' +
+      'refuses an SVG)',
   })
   @ApiResponse({ status: 403, description: 'The engine refused the change — admin rights required' })
   @ApiResponse({

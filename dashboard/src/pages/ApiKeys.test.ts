@@ -4,8 +4,11 @@
 import '../test-helpers/register-hooks.ts';
 import { test, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { ALLOWED_CHATS_MAX } from '../utils/sessionScope.ts';
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -181,6 +184,48 @@ test('a create sends the IP allow-list, chats and expiry only when filled in', a
   });
 });
 
+// The gateway takes ASCII digits only; a number typed with an Arabic or Persian keyboard is sent as the same number.
+test('a create folds native digits in the chat list and sends the ASCII chat id', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  const create = await openCreate();
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), {
+    target: {
+      value: '\u0666\u0662\u0668\u0661\u0662\u0663\u0664\n\u06f1\u06f2\u06f0\u06f3\u06f6\u06f3\u06f0\u06f0\u06f0@g.us',
+    },
+  });
+  assert.equal(screen.queryByText(/Not a chat ID or phone number/) === null, true);
+  assert.equal(create.disabled, false);
+  fireEvent.click(create);
+  await waitFor(() => assert.ok(createBody));
+  assert.deepEqual(createBody, {
+    name: 'crm-bot',
+    role: 'operator',
+    allowedSessions: [],
+    allowedChats: ['6281234@c.us', '120363000@g.us'],
+  });
+});
+
+test('a native digit entry that is no chat id is still refused and names the folded value', async () => {
+  const { screen, fireEvent } = rtl;
+  const create = await openCreate();
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), { target: { value: '\u0661\u0662\u0663\u0664' } });
+  assert.equal(create.disabled, true);
+  screen.getByText('Not a chat ID or phone number: 1234');
+});
+
+test('an edit in native digits for the chat already stored sends nothing', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  const save = await openEdit({ ...billingBot, allowedChats: ['6281234@c.us'] });
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), {
+    target: { value: '\u0666\u0662\u0668\u0661\u0662\u0663\u0664' },
+  });
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(screen.queryByRole('button', { name: 'Save' }) === null, true));
+  assert.deepEqual(updateBodies, []);
+});
+
 // The key exists once the request lands; a modal closed meanwhile would leave its one-time secret
 // unseen and pop it up on the next Create API Key click.
 test('the create modal stays open until the request settles and then shows the secret', async () => {
@@ -200,6 +245,22 @@ test('the create modal stays open until the request settles and then shows the s
   screen.getByRole('dialog');
   release();
   await screen.findByText('owa_k1_new');
+});
+
+// The secret is shown once: closing the dialog that shows it drops it, and the next Create opens the form.
+test('closing the dialog that shows a new key drops the secret, and Create opens the form again', async () => {
+  const { screen, fireEvent } = rtl;
+  const create = await openCreate();
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  fireEvent.click(create);
+  await screen.findByText('owa_k1_new');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  assert.equal(screen.queryByRole('dialog') === null, true, 'the dialog stayed open');
+  fireEvent.click(screen.getByRole('button', { name: 'Create API Key' }));
+  assert.equal(screen.queryByText('owa_k1_new') === null, true, 'the previous secret is shown again');
+  assert.equal(screen.getByLabelText<HTMLInputElement>('Name').value, '');
+  assert.ok(screen.getByRole('button', { name: 'Create' }));
 });
 
 // The gateway counts an emoji, with or without its presentation selector, as one character.
@@ -367,6 +428,55 @@ test('an untouched list with an entry the form would refuse does not block Save'
   fireEvent.change(screen.getByLabelText('Allowed IP addresses (optional)'), { target: { value: 'fd00::1' } });
   assert.equal(edited.disabled, true);
   screen.getByText('Not an IPv4 address or CIDR range: fd00::1');
+});
+
+// The gateway answers a list of more than 2000 chats with 400 and, in production, words it as a bare
+// "Bad Request". The form counts entries itself, so it has to hold the same bound the gateway publishes
+// and spare a stored list that the update does not send.
+const chatList = (count: number, offset = 0): string =>
+  Array.from({ length: count }, (_, i) => `1203630${String(offset + i).padStart(9, '0')}@g.us`).join('\n');
+
+test('the form holds the chat limit the gateway publishes', () => {
+  const contract = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../openapi.json', import.meta.url)), 'utf8'),
+  ) as {
+    components: { schemas: Record<string, { properties: { allowedChats: { maxItems: number } } }> };
+  };
+  for (const dto of ['CreateApiKeyDto', 'UpdateApiKeyDto']) {
+    assert.equal(contract.components.schemas[dto].properties.allowedChats.maxItems, ALLOWED_CHATS_MAX);
+  }
+});
+
+test('a chat list at the limit keeps Create enabled and one past it disables it', async () => {
+  const { screen, fireEvent } = rtl;
+  const create = await openCreate();
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), { target: { value: chatList(ALLOWED_CHATS_MAX) } });
+  assert.equal(create.disabled, false);
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), {
+    target: { value: chatList(ALLOWED_CHATS_MAX + 1) },
+  });
+  assert.equal(create.disabled, true);
+});
+
+test('a stored list past the limit does not block an unrelated edit, and a new one does', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  const stored = chatList(ALLOWED_CHATS_MAX + 1).split('\n');
+  const save = await openEdit({ ...billingBot, allowedChats: stored, expiresAt: '2027-03-04T05:06:59.000Z' });
+  // Left as stored it is not sent, so its length is not checked.
+  assert.equal(save.disabled, false);
+  fireEvent.click(screen.getByRole('button', { name: 'Remove expiry' }));
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(updateBodies.length, 1));
+  assert.deepEqual(updateBodies[0], { expiresAt: null });
+
+  // Replaced, it is sent whole, so it is counted again.
+  rtl.cleanup();
+  const edited = await openEdit({ ...billingBot, allowedChats: stored });
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), {
+    target: { value: chatList(ALLOWED_CHATS_MAX + 1, 100_000) },
+  });
+  assert.equal(edited.disabled, true);
 });
 
 test('a refused update keeps the editor open and shows the reason', async () => {
@@ -553,4 +663,37 @@ test('an expiry Save cannot convert ends in an error toast, not a silent no-op',
   fireEvent.click(save);
   await screen.findByText('Invalid time value');
   assert.deepEqual(updateBodies, []);
+});
+
+// The name of a key is free text and is interpolated into the delete confirmation. A name carrying a
+// styled tag became a real element with a string `style`, which React throws on, so the page went down.
+test('deleting a key whose name carries markup shows the name as text', async () => {
+  const { screen, fireEvent } = rtl;
+  const name = '<strong style="font-size:50px">boom</strong>';
+  keyList = [{ ...billingBot, name }];
+  renderApiKeys();
+  await screen.findByText('owa_k1ab****');
+
+  fireEvent.click(screen.getByTitle('Delete'));
+
+  const dialog = await screen.findByRole('dialog');
+  assert.ok(dialog.textContent?.includes(name), 'the name was not shown as typed');
+  assert.equal(dialog.querySelector('strong[style]'), null, 'the name became an element');
+});
+
+// The gateway refuses a list of more than 2000 chats with a 400, which a production gateway answers with a
+// bare "Bad Request"; the form says so before it is sent.
+test('a chat list past the gateway limit blocks Create and says how many it holds', async () => {
+  const { screen, fireEvent } = rtl;
+  const create = await openCreate();
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  const numbers = Array.from({ length: 2001 }, (_, i) => String(628000000000 + i)).join('\n');
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), { target: { value: numbers } });
+
+  const alert = await screen.findByText(/Too many chats \(2001\): a key may list at most 2000/);
+  assert.ok(alert);
+  assert.equal(create.disabled, true, 'Create is live with a list the gateway refuses');
+
+  fireEvent.change(screen.getByLabelText('Chat access (optional)'), { target: { value: '6281234' } });
+  await rtl.waitFor(() => assert.equal(create.disabled, false));
 });

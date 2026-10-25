@@ -5,7 +5,8 @@ import "encoding/json"
 // WebhookEvent names an event a webhook may subscribe to. It is an alias for
 // string so the Event* constants drop straight into the []string Events fields
 // of CreateWebhookRequest / UpdateWebhookRequest without a conversion. Use
-// EventAll ("*") to receive every event.
+// EventAll ("*") to receive all events except EventMessageReceipt, which must
+// be named.
 type WebhookEvent = string
 
 // Events a webhook may subscribe to, mirroring the server's WEBHOOK_EVENTS
@@ -14,6 +15,7 @@ const (
 	EventMessageReceived      WebhookEvent = "message.received"
 	EventMessageSent          WebhookEvent = "message.sent"
 	EventMessageAck           WebhookEvent = "message.ack"
+	EventMessageReceipt       WebhookEvent = "message.receipt"
 	EventMessageFailed        WebhookEvent = "message.failed"
 	EventMessageRevoked       WebhookEvent = "message.revoked"
 	EventMessageReaction      WebhookEvent = "message.reaction"

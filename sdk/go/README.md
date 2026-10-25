@@ -1,6 +1,6 @@
 # OpenWA Go SDK
 
-This document describes `main`. Send idempotency, webhook failure redrive, message-window filters, poll choices, and last-message types are unreleased additions after SDK 0.5.1 and require the corresponding server changes after OpenWA 0.24.0.
+This document describes SDK 0.7.0. Send idempotency, webhook failure redrive, message-window filters, poll choices, last-message types, and the `event.response` webhook event name require OpenWA 0.25.0 or later.
 
 Idiomatic Go client for the [OpenWA](https://github.com/rmyndharis/OpenWA) WhatsApp
 API Gateway. Stdlib-only (no dependencies), context-first, with typed errors and
@@ -44,7 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Link the account before sending: scan Sessions.QRCode or use Sessions.RequestPairingCode,
+	// Link the account before sending: scan Sessions.QRCode (or use Sessions.RequestPairingCode for a number with no linked session),
 	// then wait for status "ready". An unlinked session answers the send with 409.
 	res, err := client.Messages.SendText(ctx, session.ID, openwa.SendTextRequest{
 		ChatID: "628123456789@c.us",
@@ -96,7 +96,10 @@ func main() {
 res, err := client.Messages.SendText(ctx, sessionID, req)
 switch {
 case errors.Is(err, openwa.ErrConflict):
-	// 409 — engine not ready; retry once the session is "ready".
+	// 409 — a conflicting state, typically a session that is not "ready" yet:
+	// retry once it is. A keyed send can also answer 409 for a pending or
+	// uncertain outcome; APIError.Code tells them apart ("Send idempotency"
+	// below says what to do).
 case errors.Is(err, openwa.ErrNotFound):
 	// 404 — unknown session/resource.
 case err != nil:
@@ -107,26 +110,34 @@ case err != nil:
 }
 ```
 
-Sentinels: `ErrBadRequest` (400), `ErrUnauthorized` (401),
-`ErrForbidden` (403), `ErrNotFound` (404), `ErrConflict` (409),
-`ErrRateLimited` (429), `ErrNotImplemented` (501),
-`ErrServiceUnavailable` (503). 503 is transient, but a catalog 503 can persist
-because WhatsApp may never answer that query, so bound any retry. A 429 from
-the global rate limiter lifts when its window expires (seconds for the
-per-second tier, up to an hour for the hourly tier by default);
-`APIError.RetryAfter` carries its `Retry-After` header, which `WithRetry` also
-honors. A 429 whose `APIError.Code` is `"SEND_PACING_LIMITED"` is usually not
-transient: do not retry it before `RetryAfter`, which then comes from the body:
-a few seconds when only sends still in flight caused it, the rest of the failure
-breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by default)
-after a run of send failures, otherwise up to the next UTC day. `APIError.Header`
-holds the response headers. A timeout surfaces as `*openwa.TimeoutError`. A 503
-does not prove a write was never carried out: the
-engine answers it when WhatsApp did not confirm in time, and the change may still
-have been applied, so re-read the state before repeating it. In a routed
-deployment a forward that fails before reaching the owner node answers 503, one
-that fails after the request reached it answers 502 or 504, and a 503 from the
-owner itself is relayed unchanged.
+Sentinels: `ErrBadRequest` (400), `ErrUnauthorized` (401), `ErrForbidden` (403),
+`ErrNotFound` (404), `ErrConflict` (409), `ErrRateLimited` (429),
+`ErrNotImplemented` (501), `ErrServiceUnavailable` (503). 503 means the gateway
+could not complete the request right now: the path to WhatsApp failed, the
+gateway is draining or short of a dependency, or, on Baileys, WhatsApp throttled
+(code 429) or timed out (code 408) the request. Back off and retry later instead
+of at once, because repeating a throttled request straight away prolongs the
+throttle; a catalog 503 can persist because WhatsApp may never answer that
+query, so bound any retry. A 429 from the global rate limiter lifts when its
+window expires (seconds for the per-second tier, up to an hour for the hourly
+tier by default); `APIError.RetryAfter` carries its `Retry-After` header, which
+`WithRetry` also honors. A 429 whose `APIError.Code` is `"SEND_PACING_LIMITED"`
+is usually not transient: do not retry it before `RetryAfter`, which then comes
+from the body: a few seconds when only sends still in flight caused it, the rest
+of the failure breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes
+by default) after a run of send failures, otherwise up to the next UTC day.
+`APIError.Header` holds the response headers. A timeout surfaces as
+`*openwa.TimeoutError`. A 503 does not always prove a write was never carried
+out: when WhatsApp timed out, the change may still have been applied, so re-read
+the state before repeating it. A throttle on a send or a single write is the
+exception: it was turned away before it ran, so nothing was sent or applied, and
+a keyed send frees its `Idempotency-Key`. A group settings update with several
+fields applies them one at a time, so a 503 on a later field, a throttle
+included, leaves the earlier ones applied; its message lists them after
+`already applied:`, so re-read the settings before retrying, or send one field
+per request. In a routed deployment a forward that fails before reaching the
+owner node answers 503, one that fails after the request reached it answers 502
+or 504, and a 503 from the owner itself is relayed unchanged.
 
 ## Retries
 
@@ -138,7 +149,9 @@ lists them): a 500/502/504 can arrive after the message was already sent, so
 replaying it could send it twice. A 429 whose body has `code: "SEND_PACING_LIMITED"` is
 never retried, whatever the method: its delay is the body's `retryAfterSeconds`, which can be
 hours. Backoff is exponential, `Retry-After` is honored, and request bodies are safely rewound
-on each attempt.
+on each attempt. A 503 can be WhatsApp throttling a Baileys send, and the default backoff (three
+retries from 200ms) replays it within about a second and a half; for sends raise `BaseDelay` or lower
+`MaxRetries`, or retry the throttled send yourself later.
 
 ```go
 client, _ := openwa.New(baseURL, apiKey,
@@ -255,10 +268,10 @@ subdirectory rather than at the repository root:
 
 ```bash
 # Correct — `sdk/go/` prefix, matching `module github.com/rmyndharis/OpenWA/sdk/go`
-git tag sdk/go/v0.5.1 && git push origin sdk/go/v0.5.1
+git tag sdk/go/v0.7.0 && git push origin sdk/go/v0.7.0
 ```
 
-A bare `v0.5.1` tag is the _app_ version and does nothing for this module.
+A bare `v0.7.0` tag is the _app_ version and does nothing for this module.
 Without a prefixed tag, `go get` resolves a pseudo-version
 (`v0.0.0-<date>-<commit>`) — usable, but callers cannot pin a release.
 
@@ -277,13 +290,13 @@ Cutting a release:
 
 ## Send idempotency
 
-The example below requires the unreleased SDK changes on `main`; SDK 0.5.1 does not expose this per-send key argument. The server must also include the send idempotency changes after OpenWA 0.24.0.
+The example below requires SDK 0.6.0 or later and OpenWA 0.25.0 or later. SDK 0.5.1 does not expose this per-send key argument.
 
-Supply a unique caller-owned key for one logical send and reuse it when retrying that same call. Keys contain 1-255 visible ASCII characters; unrelated calls must use different keys. The SDK forwards the key without changing its retry policy or generating one automatically.
+Supply a unique caller-owned key for one logical send and reuse it when retrying that same call. Keys contain 1-255 visible ASCII characters; unrelated calls must use different keys. The SDK forwards the key without changing its retry policy or generating one automatically. On the twelve routes below `net/http` may still send a keyed request once more after a dropped keep-alive connection; the gateway deduplicates it, so the call returns the first answer or a `409` `IDEMPOTENCY_KEY_IN_PROGRESS` to retry later with the same key.
 
 ```go
 ctx := openwa.WithIdempotencyKey(context.Background(), "order-123")
 _, err := client.Messages.SendText(ctx, sessionID, openwa.SendTextRequest{ChatID: "628123@c.us", Text: "Hello"})
 ```
 
-The gateway supports text, image, video, audio, document, sticker, location, contact, template, poll, reply and forward sends. Completed calls replay their response; pending or uncertain outcomes return 409, and a changed request with the same key returns 422. The gateway retains keys for 24 hours. Bulk, product and button operations have no such guarantee. Omit the key to preserve existing behavior.
+The gateway supports text, image, video, audio, document, sticker, location, contact, template, poll, reply and forward sends. Completed calls replay their response; a 409 with the error `code` `IDEMPOTENCY_KEY_IN_PROGRESS` means the first request is still running, so retry with the same key later; a 409 `IDEMPOTENCY_OUTCOME_UNKNOWN` means the message may have been sent, so check the chat and, if it did not arrive, send again with a new key (the `code` tells them apart from the 409 for a session that is not connected). A changed request with the same key returns 422. The gateway retains keys for 24 hours. Bulk, product and button operations have no such guarantee. Omit the key to preserve existing behavior.

@@ -126,7 +126,7 @@ func (s *MessagesService) EditMessage(ctx context.Context, sessionID string, bod
 	return &out, nil
 }
 
-// History reads live chat history from WhatsApp.
+// History reads live chat history from WhatsApp. whatsapp-web.js only; Baileys answers 501.
 func (s *MessagesService) History(ctx context.Context, sessionID, chatID string, query *MessageHistoryQuery) ([]ChatHistoryMessage, error) {
 	var out []ChatHistoryMessage
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/history"
@@ -134,7 +134,7 @@ func (s *MessagesService) History(ctx context.Context, sessionID, chatID string,
 	return out, err
 }
 
-// Reactions returns the reactions on a message.
+// Reactions returns the reactions on a message. whatsapp-web.js only; Baileys answers 501.
 func (s *MessagesService) Reactions(ctx context.Context, sessionID, chatID, messageID string) ([]ReactionRecord, error) {
 	var out []ReactionRecord
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/" + pathEscape(messageID) + "/reactions"
@@ -181,7 +181,8 @@ func (s *MessagesService) Unpin(ctx context.Context, sessionID string, body Unpi
 // Media fetches a message's stored media bytes: the archived file when one
 // exists, else the inline copy on the message row — which covers media sent by
 // this account. The server answers 404 when neither holds bytes (no media, a
-// size-only marker, or a URL-based send whose bytes were never stored).
+// size-only marker, or a URL-based send, whose bytes the gateway does not store
+// though on whatsapp-web.js the own-send echo may).
 func (s *MessagesService) Media(ctx context.Context, sessionID, chatID, messageID string) (*MessageMedia, error) {
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/" + pathEscape(messageID) + "/media"
 	data, contentType, err := s.client.doRaw(ctx, "GET", path, nil, nil, false)

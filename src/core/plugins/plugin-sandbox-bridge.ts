@@ -11,6 +11,7 @@ import { PluginWorkerHost } from './sandbox/plugin-worker-host';
 import { dispatchCapabilityVerb } from './sandbox/capability-router';
 import { PluginLogLevel } from './sandbox/protocol';
 import { shouldDispatchToPlugin } from './handover-gate';
+import { countMetaValues, metaText } from './sandbox-log-meta';
 import { makeOnWebhookSubscribe } from './webhook-subscribe.util';
 import { registerPluginSearchProvider, unregisterPluginSearchProvider } from './search-provider-registration.util';
 import { INGRESS_DISPATCH_TIMEOUT_MS } from '../../modules/integration/integration.constants';
@@ -65,7 +66,7 @@ type CreateSandboxHostFn = (
   onLog?: (level: PluginLogLevel, message: string, meta?: Record<string, unknown>) => void,
   runWithHookGuard?: (inFlightEvents: string[], run: () => Promise<unknown>) => Promise<unknown>,
   onSearchProviderRegister?: () => void,
-  onWorkerExit?: (code: number, intentional: boolean) => void,
+  onWorkerExit?: (code: number, intentional: boolean, reason?: string) => void,
   onUnresponsive?: () => void,
 ) => PluginWorkerHost;
 
@@ -337,7 +338,7 @@ export class PluginSandboxBridge {
 
     const onSearchProviderRegister = this.buildSearchProviderRegistrar(pluginId, plugin);
 
-    const onWorkerExit = this.buildWorkerExitHandler(pluginId, logRelayState);
+    const onWorkerExit = this.buildWorkerExitHandler(pluginId, logRelayState, () => host);
 
     // A worker whose event loop stays blocked after a dispatch timeout (a synchronous loop in plugin
     // code) would otherwise keep running and queue every later dispatch for the full budget each.
@@ -576,23 +577,32 @@ export class PluginSandboxBridge {
         state.dropped++;
         return;
       }
-      // Like the level below, the message and meta come off the wire unchecked: a non-string message is coerced
-      // before the length check, and a meta whose JSON form exceeds the same cap is replaced by a size
-      // marker (not a truncated string, which would hide its keys from the logger's secret redaction).
+      // Like the level below, the message and meta come off the wire unchecked: a non-string message is replaced by
+      // a fixed marker (turning an array into text would write a shared reference out at every use), and a meta
+      // whose text, as the logger writes it (metaText), exceeds the same cap is replaced by a size marker (not a
+      // truncated string, which would hide its keys from the logger's secret redaction).
       // logger.error's reason travels as a string meta.error, so that one key survives the replacement.
       const truncate = (value: string): string =>
         value.length > SANDBOX_LOG_MAX_MESSAGE_LENGTH
           ? `${value.slice(0, SANDBOX_LOG_MAX_MESSAGE_LENGTH)}…[truncated]`
           : value;
-      const bounded = truncate(typeof message === 'string' ? message : String(message));
+      const bounded = truncate(typeof message === 'string' ? message : '[non-string log message]');
       let boundedMeta = meta;
       if (meta !== undefined) {
         const reason = typeof meta?.error === 'string' ? { error: truncate(meta.error) } : undefined;
-        try {
-          const metaLength = JSON.stringify(meta).length;
-          if (metaLength > SANDBOX_LOG_MAX_MESSAGE_LENGTH) boundedMeta = { ...reason, metaTruncated: true, metaLength };
-        } catch {
-          boundedMeta = reason; // not serializable (circular or BigInt), so it cannot be logged as JSON anyway
+        // A count past the size limit (values, string characters and property name characters) marks a meta that is
+        // replaced without being written out. The text is only built, to learn its length, for a meta under the
+        // limit: building it for any other could take seconds, as a shared reference is written out at every use.
+        if (countMetaValues(meta, SANDBOX_LOG_MAX_MESSAGE_LENGTH) > SANDBOX_LOG_MAX_MESSAGE_LENGTH) {
+          boundedMeta = { ...reason, metaTruncated: true };
+        } else {
+          try {
+            const metaLength = (metaText(meta) ?? '').length;
+            if (metaLength > SANDBOX_LOG_MAX_MESSAGE_LENGTH)
+              boundedMeta = { ...reason, metaTruncated: true, metaLength };
+          } catch {
+            boundedMeta = reason; // circular, or holding a BigInt, whose text is not built on the host
+          }
         }
       }
       // The level comes off the wire unchecked (plugin code can post to parentPort directly), and the
@@ -646,8 +656,9 @@ export class PluginSandboxBridge {
   private buildWorkerExitHandler(
     pluginId: string,
     logRelayState: SandboxLogRelayState,
-  ): (code: number, intentional: boolean) => void {
-    return (code: number, intentional: boolean): void => {
+    getSourceHost: () => PluginWorkerHost,
+  ): (code: number, intentional: boolean, reason?: string) => void {
+    return (code: number, intentional: boolean, reason?: string): void => {
       // Final log-relay flush: the per-window drop warn above only fires when a new line arrives in a
       // later window, so without this a plugin that goes quiet (or is disabled) before the rollover
       // silently discards its pending count. The worker is gone, so no further lines can arrive.
@@ -658,17 +669,19 @@ export class PluginSandboxBridge {
         );
         logRelayState.dropped = 0;
       }
-      // Always release the search-provider slot so the registry can fall back to builtin-fts. On a crash
-      // this is the only cleanup; on a deliberate disable/enable-failure the explicit unregister already
-      // ran, making this a harmless no-op.
+      // A replacement owns its provider, hooks and status. An absent host still needs cleanup after
+      // markWorkerFailed removed the retiring worker before its termination completed.
+      const currentHost = this.sandboxHosts.get(pluginId);
+      if (currentHost && currentHost !== getSourceHost()) return;
       unregisterPluginSearchProvider(this.hostServices.getSearchRegistryPort(), pluginId);
       if (intentional) return; // routine disable/enable-failure already logged and expected
       // Unexpected crash after a successful enable: the worker is gone. Drop the dead host +
       // unregister the hook shims (so they don't keep dispatching into the dead worker) + mark the
       // plugin ERROR so the dashboard reflects reality. The dispatchHook/dispatchWebhook dead-checks
       // fail-fast; this cleanup is the root-cause fix (it also makes the shim's !liveHost guard fire).
-      this.markWorkerFailed(pluginId, `worker exited unexpectedly (code ${code})`);
-      this.logger.warn(`Sandboxed plugin ${pluginId} worker exited unexpectedly (code ${code})`, {
+      const why = reason ? `: ${reason}` : '';
+      this.markWorkerFailed(pluginId, `worker exited unexpectedly (code ${code})${why}`);
+      this.logger.warn(`Sandboxed plugin ${pluginId} worker exited unexpectedly (code ${code})${why}`, {
         pluginId,
         code,
         action: 'sandbox_worker_exit',

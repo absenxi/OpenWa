@@ -1,3 +1,4 @@
+import { parseWaId } from '../identity/wa-id';
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { Chat, Contact as BaileysContact, WAMessage, WAMessageKey, WASocket } from '@whiskeysockets/baileys';
 import { EngineEventCallbacks, IncomingMessage, MessageType } from '../interfaces/whatsapp-engine.interface';
@@ -10,6 +11,7 @@ import {
   extractBaileysCommerce,
   extractBaileysPoll,
   isBaileysCatalogShare,
+  keyParticipant,
 } from './baileys-message-mapper';
 import { BAILEYS_QUERY_BUDGET_MS, withQueryDeadline } from './baileys-query-deadline';
 import { type createLogger } from '../../common/services/logger.service';
@@ -25,6 +27,7 @@ export interface BaileysHistoryHost {
   getSocket(): WASocket;
   readonly logger: ReturnType<typeof createLogger>;
   toNeutralJid(jid: string): string;
+  findPersistedLidPhone?(jid: string): Promise<string | null>;
   normalizedSelfJid(): string;
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   loadLib(): Promise<typeof BaileysLib>;
@@ -44,6 +47,7 @@ export interface BaileysHistoryHost {
   extractEphemeralDuration(msg: WAMessage): number | undefined;
   /** The currently-registered onHistoryMessages callback, if any (assigned at initialize()). */
   getOnHistoryMessages(): EngineEventCallbacks['onHistoryMessages'];
+  getStoredWriteGeneration?(): number;
 }
 
 /**
@@ -104,14 +108,17 @@ export class BaileysHistory {
     if (!messages.length) {
       return;
     }
+    const generation = this.host.getStoredWriteGeneration?.();
+    const current = (): boolean => generation === this.host.getStoredWriteGeneration?.();
     const b = await this.host.loadLib();
+    if (!current()) return;
     const nameUpdates: { id: string; notify: string }[] = [];
     const mapped: IncomingMessage[] = [];
     const revokes: { message: WAMessage; target: WAMessageKey }[] = [];
     const targets = new Map(messages.filter(msg => msg.key?.id).map(msg => [msg.key.id!, msg]));
     for (const msg of messages) {
       if (msg.key?.fromMe !== true && msg.pushName) {
-        const sender = msg.key?.participant ?? msg.key?.remoteJid;
+        const sender = keyParticipant(msg.key ?? {}) ?? msg.key?.remoteJid;
         if (sender) {
           nameUpdates.push({ id: sender, notify: msg.pushName });
         }
@@ -134,6 +141,7 @@ export class BaileysHistory {
         original?.key ?? { ...target, remoteJid: target.remoteJid ?? message.key.remoteJid },
         message.key,
       );
+      if (!current()) return;
       if (!key?.remoteJid) continue;
       const cleared = this.revokedMessage(key, toUnixSeconds(original?.messageTimestamp ?? message.messageTimestamp));
       mapped.push(cleared);
@@ -143,6 +151,7 @@ export class BaileysHistory {
     }
     if (mapped.length) {
       const storedRevokes = await this.host.getOnHistoryMessages()?.(mapped);
+      if (!current()) return;
       const revoked = (storedRevokes ?? mapped).filter(m => m.type === 'revoked');
       const revokedKeys = new Set(revoked.map(m => JSON.stringify([m.id, m.chatId, m.fromMe])));
       for (const incoming of mapped) {
@@ -151,7 +160,14 @@ export class BaileysHistory {
         const deleted = revokedKeys.has(JSON.stringify([incoming.id, incoming.chatId, incoming.fromMe]));
         this.host.recordMessage(original, deleted ? 'revoked' : incoming.type);
       }
-      for (const m of revoked) this.host.recordMessageEdit(m.chatId, m.id, '', 'revoked');
+      for (const m of revoked) {
+        this.host.recordMessageEdit(m.chatId, m.id, '', 'revoked');
+        if (parseWaId(m.chatId).kind === 'lid') {
+          const phone = await this.host.findPersistedLidPhone?.(m.chatId).catch(() => null);
+          if (!current()) return;
+          if (phone) this.host.recordMessageEdit(`${phone}@s.whatsapp.net`, m.id, '', 'revoked');
+        }
+      }
     }
   }
 
@@ -161,7 +177,7 @@ export class BaileysHistory {
         id: key.id!,
         remoteJid: key.remoteJid!,
         fromMe: key.fromMe === true,
-        participant: key.participant ?? undefined,
+        participant: keyParticipant(key),
         body: '',
         contentType: undefined,
         timestamp,
@@ -307,7 +323,7 @@ export class BaileysHistory {
         id: msg.key.id,
         remoteJid: msg.key.remoteJid,
         fromMe: msg.key.fromMe === true,
-        participant: msg.key.participant ?? undefined,
+        participant: keyParticipant(msg.key),
         body,
         contentType,
         isPtt: content.audioMessage?.ptt === true,

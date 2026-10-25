@@ -1,5 +1,6 @@
 import { resolve } from 'path';
 import { normalizeS3KeyPrefix } from '../common/storage/s3-key-prefix';
+import { namesBundledContainer } from '../modules/docker/bundled-host';
 import { resolveBodyLimit } from './bootstrap-security';
 import { parseBodyLimitBytes } from './inflight-body-budget';
 
@@ -116,6 +117,14 @@ export function validateEnv(config: EnvConfig): EnvConfig {
       `S3_KEY_PREFIX must be a relative key prefix such as "staging/" with no empty, "." or ".." segment (got ${JSON.stringify(s3KeyPrefix)})`,
     );
   }
+  // The BullMQ key prefix is joined to the queue name with a colon in every Redis key, so a colon or
+  // whitespace in it builds keys that tooling cannot split back apart.
+  const queuePrefix = str('QUEUE_PREFIX');
+  if (queuePrefix !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(queuePrefix)) {
+    errors.push(
+      `QUEUE_PREFIX must be 1 to 64 letters, digits, dots, underscores or hyphens, starting with a letter or digit (got ${JSON.stringify(queuePrefix)})`,
+    );
+  }
   // Every production hardening in the repo gates on the exact string 'production', so an
   // unrecognised value silently selects the permissive branch of each one — CORS, Swagger, DTO
   // error detail, the default-secret guard and the ALLOW_DEV_API_KEY rejection that stops the public
@@ -165,6 +174,20 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     const pgSchemaError = typeof pgSchema === 'string' && pgSchema !== '' ? postgresSchemaError(pgSchema) : null;
     if (pgSchemaError) {
       errors.push(pgSchemaError);
+    }
+    // The bundled PostgreSQL container runs without TLS (DockerService.getContainerSpec sets none up), so the built-in
+    // database with DATABASE_SSL=true retries its connection until the boot gives up, and the dashboard that could undo
+    // it stays down. Both flags are read raw, as configuration.ts and the boot guard compare them.
+    const dbHost = str('DATABASE_HOST');
+    if (
+      config.POSTGRES_BUILTIN === 'true' &&
+      config.DATABASE_SSL === 'true' &&
+      namesBundledContainer('postgres', dbHost)
+    ) {
+      errors.push(
+        `DATABASE_SSL=true cannot reach the built-in PostgreSQL container (POSTGRES_BUILTIN=true, DATABASE_HOST=${dbHost}), ` +
+          'which runs without TLS: set DATABASE_SSL=false where it is set (data/.env.generated, the project .env or the environment)',
+      );
     }
   } else {
     // SQLite (explicit or default): DATABASE_NAME is a file path for the 'data' connection. It must
@@ -246,6 +269,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'REDIS_CACHE_DB',
     'INBOUND_MEDIA_GLOBAL_CONCURRENCY', // 0 = no process-wide ceiling, only the per-session one
     'SHUTDOWN_DELAY_MS', // 0 = no drain; parseInt read `3s` as a 3 ms drain
+    'WEBHOOK_SHUTDOWN_DRAIN_MS', // 0 = no wait; a malformed value fell back to 5000 and also moved the force-exit
     // 0 = disabled. A negative value failed the digits-only read and silently kept the default sweep.
     'MESSAGE_REAPER_INTERVAL_MS',
     'WEBHOOK_RECONCILE_INTERVAL_MS',
@@ -254,6 +278,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'MESSAGE_REAPER_GRACE_MS',
     'WEBHOOK_RECONCILE_GRACE_MS',
     'INGRESS_RECONCILE_GRACE_MS',
+    'BAILEYS_GROUP_METADATA_CACHE_TTL_MS', // 0 = no cache; every group send then queries the participant list
   ]) {
     checkNonNegativeInt(key);
   }
@@ -427,7 +452,6 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'STORAGE_IMPORT_MAX_BYTES',
     'STORAGE_IMPORT_MAX_ENTRIES',
     'STORAGE_IMPORT_MAX_TOTAL_BYTES',
-    'STORAGE_LIST_MAX_FILES',
     'BAILEYS_MESSAGE_STORE_LIMIT',
     // Each read fell back to its default on 0 or garbage, or passed a negative or fractional value on
     // (SEARCH_LIMIT_MAX reached plugin search providers as-is).

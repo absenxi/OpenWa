@@ -1,5 +1,9 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FOREIGN_TRANSACTION_WAIT_MS } from '../../common/utils/shared-connection';
 import { PluginInstance } from './entities/plugin-instance.entity';
+import { ConversationMapping } from './entities/conversation-mapping.entity';
+import { ConversationMappingService } from './conversation-mapping.service';
 import { PluginInstanceService, InstanceExistsError } from './plugin-instance.service';
 import { AddIntegrationFabric1781900000000 } from '../../database/migrations/1781900000000-AddIntegrationFabric';
 import type { PluginConfigSchema } from '../../core/plugins/plugin.interfaces';
@@ -118,7 +122,12 @@ describe('PluginInstanceService provisioning', () => {
   let ds: DataSource;
   let service: PluginInstanceService;
   beforeEach(async () => {
-    ds = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [PluginInstance], migrations: [] });
+    ds = new DataSource({
+      type: 'better-sqlite3',
+      database: ':memory:',
+      entities: [PluginInstance, ConversationMapping],
+      migrations: [],
+    });
     await ds.initialize();
     const runner = ds.createQueryRunner();
     await new AddIntegrationFabric1781900000000().up(runner);
@@ -151,6 +160,36 @@ describe('PluginInstanceService provisioning', () => {
     expect(rotated?.secret).not.toBe(created.secret);
   });
 
+  it('releases the takeover a deleted instance held, so other plugins are no longer silenced on that chat', async () => {
+    const mappings = ds.getRepository(ConversationMapping);
+    const mapping = (pluginId: string, instanceId: string, chatId: string, handoverState: 'human' | 'closed') =>
+      mappings.save(
+        mappings.create({
+          sessionId: 'sess-1',
+          chatId,
+          pluginId,
+          instanceId,
+          providerConversationId: `${instanceId}-${chatId}`,
+          handoverState,
+        }),
+      );
+    await mapping('chatwoot', 'acct1', '1@c.us', 'human');
+    await mapping('chatwoot', 'acct1', '2@c.us', 'closed');
+    await mapping('chatwoot', 'acct2', '3@c.us', 'human');
+    const lookup = new ConversationMappingService(mappings);
+    expect(await lookup.findHandoverForChat('sess-1', '1@c.us')).toMatchObject({ handoverState: 'human' });
+
+    await service.create('chatwoot', 'acct1', {});
+    await service.remove('chatwoot', 'acct1');
+
+    expect(await lookup.findHandoverForChat('sess-1', '1@c.us')).toBeNull();
+    expect(await lookup.findHandoverForChat('sess-1', '2@c.us')).toBeNull();
+    // The rows stay, so the same instance provisioned again keeps its provider conversations; another
+    // instance's takeover is untouched.
+    expect((await mappings.findOneByOrFail({ chatId: '1@c.us' })).providerConversationId).toBe('acct1-1@c.us');
+    expect(await lookup.findHandoverForChat('sess-1', '3@c.us')).toMatchObject({ handoverState: 'human' });
+  });
+
   it('update patches enabled/scope/config in one write; remove deletes', async () => {
     await service.create('chatwoot', 'acct1', { sessionScope: 'a' });
     const repo = ds.getRepository(PluginInstance);
@@ -166,6 +205,90 @@ describe('PluginInstanceService provisioning', () => {
     expect(await service.remove('chatwoot', 'acct1')).toBe(true);
     expect(await service.resolve('chatwoot', 'acct1')).toBeNull();
     expect(await service.remove('chatwoot', 'acct1')).toBe(false);
+  });
+
+  // On SQLite every caller shares one connection. A transaction begun in the same turn of the event loop as the
+  // remove's would nest in it or hold it, so either could fail on the other's state or undo the other's writes.
+  describe('a remove beside another transaction begun in the same turn', () => {
+    const settle = (result: Promise<unknown>) => result.catch((error: unknown) => String(error));
+    const after = <T>(steps: number, start: () => Promise<T>) =>
+      (async () => {
+        for (let i = 0; i < steps; i += 1) await Promise.resolve();
+        return start();
+      })();
+    async function provision(instanceId: string) {
+      await service.create('chatwoot', instanceId, {});
+      const mappings = ds.getRepository(ConversationMapping);
+      await mappings.save(
+        mappings.create({
+          sessionId: 'sess-1',
+          chatId: `${instanceId}@c.us`,
+          pluginId: 'chatwoot',
+          instanceId,
+          providerConversationId: instanceId,
+          handoverState: 'human',
+        }),
+      );
+    }
+    const left = async (instanceId: string) => ({
+      rows: await ds.getRepository(PluginInstance).countBy({ instanceId }),
+      handover: (await ds.getRepository(ConversationMapping).findOneByOrFail({ instanceId })).handoverState,
+    });
+    const gone = { rows: 0, handover: 'bot' };
+
+    // A write that fails on the primary key and rolls its transaction back.
+    const failing = () =>
+      ds.transaction(manager => manager.query('INSERT INTO plugin_instances SELECT * FROM plugin_instances'));
+
+    it.each(['before', 'after'])('removes the instance when a transaction that fails begins %s it', async order => {
+      for (let steps = 0; steps <= 40; steps += 1) {
+        const instanceId = `acct-${steps}`;
+        await provision(instanceId);
+        const remove = () => service.remove('chatwoot', instanceId);
+        const [removed] =
+          order === 'after'
+            ? await Promise.all([settle(remove()), settle(after(steps, failing))])
+            : await Promise.all([settle(after(steps, remove)), settle(failing())]);
+        expect({ steps, removed, ...(await left(instanceId)) }).toEqual({ steps, removed: true, ...gone });
+      }
+    });
+
+    it('removes both instances of two removes', async () => {
+      for (let steps = 0; steps <= 40; steps += 1) {
+        await provision(`first-${steps}`);
+        await provision(`second-${steps}`);
+        const removed = await Promise.all([
+          settle(service.remove('chatwoot', `first-${steps}`)),
+          settle(after(steps, () => service.remove('chatwoot', `second-${steps}`))),
+        ]);
+        expect({ steps, removed, first: await left(`first-${steps}`), second: await left(`second-${steps}`) }).toEqual({
+          steps,
+          removed: [true, true],
+          first: gone,
+          second: gone,
+        });
+      }
+    });
+
+    it('refuses with 503 and removes nothing when a transaction beside it stays open', async () => {
+      await provision('held');
+      const other = ds.createQueryRunner();
+      await other.connect();
+      await other.startTransaction();
+      const start = Date.now();
+      let calls = 0;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => start + FOREIGN_TRANSACTION_WAIT_MS * calls++);
+
+      try {
+        await expect(service.remove('chatwoot', 'held')).rejects.toThrow(ServiceUnavailableException);
+      } finally {
+        clock.mockRestore();
+      }
+      await other.commitTransaction();
+      await other.release();
+
+      expect(await left('held')).toEqual({ rows: 1, handover: 'human' });
+    });
   });
 
   it('update and regenerateSecret return the stored updatedAt, not the one read before the write', async () => {

@@ -101,6 +101,10 @@ export class SessionController {
   })
   @ApiResponse({ status: 400, description: 'Validation failed, or the body carries a field the DTO does not declare.' })
   @ApiResponse({ status: 409, description: 'Session name already exists' })
+  @ApiResponse({
+    status: 503,
+    description: 'On SQLite, another database transaction stayed open for 10 s; nothing was stored, so retry.',
+  })
   async create(@Body() dto: CreateSessionDto, @CurrentApiKey() apiKey?: ApiKey): Promise<SessionResponseDto> {
     // A session proxy carries the session's egress, including the gateway's fetches of caller-supplied
     // URLs, so choosing one is a deployment decision: ADMIN only, like PATCH :sessionId/proxy. The
@@ -277,10 +281,11 @@ export class SessionController {
   @ApiResponse({
     status: 409,
     description:
-      'A credential teardown for the same session name is still in flight (retryable — the body ' +
+      'A credential teardown for the same session name is still in flight (retryable: the body ' +
       "carries `code: 'SESSION_NAME_TEARDOWN_PENDING'`; wait for it to settle and retry), OR " +
       "another node currently holds this session's live engine and deleting it here would strip a " +
-      'session the owner is running. No destructive side effect runs before either refusal.',
+      'session the owner is running, OR ownership changes while deletion runs. The first two refusals ' +
+      'remove nothing. Ownership loss stops later deletion units; earlier batches may already be committed.',
   })
   async delete(@Param('sessionId', ParseUUIDPipe) id: string): Promise<void> {
     const session = await this.sessionService.findOne(id);
@@ -505,7 +510,15 @@ export class SessionController {
 
   @Post(':sessionId/pairing-code')
   @RequireRole(ApiKeyRole.OPERATOR)
-  @ApiOperation({ summary: 'Request an 8-char pairing code to link via phone number (alternative to QR)' })
+  @ApiOperation({
+    summary: 'Request an 8-char pairing code to link via phone number (alternative to QR)',
+    description:
+      'On the whatsapp-web.js engine, only request a code for a number you are prepared to re-link. A request ' +
+      'for a number that already has a linked session has been observed to end with WhatsApp revoking that ' +
+      'device: the linked session logs out, its credentials are deleted and it falls back to `qr_ready`. ' +
+      'Nothing refuses such a request, because the guards check the session state and never the number. ' +
+      'Baileys was not affected in the same tests. Link by QR when a session of that number must stay up.',
+  })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiResponse({ status: 201, description: 'Pairing code generated', type: PairingCodeResponseDto })
   @ApiResponse({ status: 400, description: 'Session not started or already authenticated' })
@@ -581,8 +594,9 @@ export class SessionController {
     // This route is admitted to a chat-restricted key because it FILTERS to the key's chats rather
     // than naming one in the path. Filter BEFORE paginating: filtering the page instead would give a
     // restricted key a short or empty window while an allowed chat sat just past it.
-    const visible = await this.chatScope.filter(apiKey, await this.sessionService.listChats(id), chat => chat.id);
-    return paginate(visible, limit ? parseInt(limit, 10) : undefined, offset ? parseInt(offset, 10) : undefined);
+    const skip = offset ? parseInt(offset, 10) : undefined;
+    const visible = await this.chatScope.filter(apiKey, await this.sessionService.listChats(id, skip), chat => chat.id);
+    return paginate(visible, limit ? parseInt(limit, 10) : undefined, skip);
   }
 
   @ChatScoped('fenced')

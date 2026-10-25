@@ -558,6 +558,8 @@ class ResourcesTest extends TestCase
         $client->groups->rejectMembershipRequests('s', 'g1@g.us');
         $this->assertStringEndsWith('/membership-requests/reject', $backend->lastCall()['url']);
         $this->assertSame([], $backend->lastCall()['body']);
+        // On the wire that is an empty object, as in the other SDKs, not an empty array.
+        $this->assertSame('{}', $backend->rawBody(2));
     }
 
     public function testCreateCallLink(): void
@@ -589,6 +591,17 @@ class ResourcesTest extends TestCase
         $this->assertSame('{}', $backend->rawBody(1));
     }
 
+    public function testRedriveDeliveryFailuresKeepsAnExplicitEmptyIdsList(): void
+    {
+        // The gateway reads ids: [] as "replay nothing" and an omitted ids as "replay up to 100 rows".
+        $backend = new MockBackend();
+        $backend->on(200, ['redriven' => 0, 'delivered' => 0, 'enqueued' => 0, 'failed' => 0, 'skipped' => 0, 'remaining' => 3]);
+
+        $backend->makeClient()->webhooks->redriveDeliveryFailures(['ids' => []]);
+
+        $this->assertSame('{"ids":[]}', $backend->rawBody(0));
+    }
+
     public function testSendMethodsForwardIdempotencyKeysWithoutChangingJson(): void
     {
         $cases = [
@@ -605,7 +618,7 @@ class ResourcesTest extends TestCase
             ['reply', 'reply', ['chatId' => 'a@c.us', 'quotedMessageId' => 'q', 'text' => 'reply']],
             ['forward', 'forward', ['fromChatId' => 'a@c.us', 'toChatId' => 'b@c.us', 'messageId' => 'm']],
         ];
-        foreach ([null, '!', str_repeat('a', 255)] as $key) {
+        foreach ([null, '!', '~', 'a', str_repeat('a', 255)] as $key) {
             $backend = new MockBackend();
             $client = $backend->makeClient();
             foreach ($cases as $index => [$method, $segment, $body]) {
@@ -618,6 +631,8 @@ class ResourcesTest extends TestCase
                 $call = $backend->lastCall();
                 $this->assertSame('POST', $call['method'], $method);
                 $this->assertSame('/api/sessions/s/messages/' . $segment, $call['path'], $method);
+                // The key travels in its header only: in the URL it would reach proxy and access logs.
+                $this->assertSame('', $call['query'], $method);
                 $this->assertSame($body, $call['body'], $method);
                 $expected = $body;
                 if ($method === 'sendTemplate') {
@@ -647,6 +662,7 @@ class ResourcesTest extends TestCase
                 $client->messages->sendText('s', $body, $key);
                 $this->assertSame($key, $backend->lastCall()['headers']['idempotency-key']);
             }
+            $this->assertSame('', $backend->lastCall()['query']);
             $this->assertSame($body, $backend->lastCall()['body']);
         }
     }
@@ -676,7 +692,7 @@ class ResourcesTest extends TestCase
     {
         $backend = new MockBackend();
         $client = $backend->makeClient();
-        foreach (['', ' ', 'contains space', "key\n", "\xC3\xA9", str_repeat('a', 256)] as $key) {
+        foreach (['', ' ', 'contains space', "key\n", "\xC3\xA9", "a\x7Fb", str_repeat('a', 256)] as $key) {
             try {
                 $client->messages->sendText('s', ['chatId' => 'a@c.us', 'text' => 'hello'], $key);
                 $this->fail('Expected invalid key to be refused');
@@ -685,6 +701,59 @@ class ResourcesTest extends TestCase
                 $this->assertSame([], $backend->calls());
             }
         }
+    }
+
+    /**
+     * Eleven routes no other test calls. Each row is written from the contract (openapi.json: verb, path,
+     * query and request-body keys), not read off the client, so a changed verb or a renamed body key fails here.
+     *
+     * @dataProvider untestedRoutes
+     */
+    public function testVerbPathQueryAndBodyOfARouteNoOtherTestCalls(
+        callable $call,
+        string $method,
+        string $path,
+        array $query,
+        ?array $body
+    ): void {
+        $backend = (new MockBackend())->on(200, []);
+        $call($backend->makeClient());
+
+        $this->assertCount(1, $backend->calls());
+        $this->assertRequest($backend, $method, $path);
+        parse_str($backend->lastCall()['query'], $sent);
+        $this->assertSame($query, $sent);
+        $this->assertSame($body === null ? '' : json_encode($body), $backend->rawBody(0));
+    }
+
+    public static function untestedRoutes(): array
+    {
+        $config = ['autoRejectCalls' => true, 'maxReconnectAttempts' => null, 'reconnectBaseDelay' => 2000];
+        return [
+            'sessions->getConfig' => [fn (Client $c) => $c->sessions->getConfig('s1'), 'GET', '/api/sessions/s1/config', [], null],
+            'sessions->updateConfig' => [fn (Client $c) => $c->sessions->updateConfig('s1', $config), 'PATCH', '/api/sessions/s1/config', [], $config],
+            'sessions->getProxy' => [fn (Client $c) => $c->sessions->getProxy('s1'), 'GET', '/api/sessions/s1/proxy', [], null],
+            'sessions->updateProxy' => [fn (Client $c) => $c->sessions->updateProxy('s1', ['proxyUrl' => null]), 'PATCH', '/api/sessions/s1/proxy', [], ['proxyUrl' => null]],
+            'webhooks->listAll' => [fn (Client $c) => $c->webhooks->listAll(['limit' => 5, 'offset' => 10]), 'GET', '/api/webhooks', ['limit' => '5', 'offset' => '10'], null],
+            'webhooks->deliveryFailures' => [
+                fn (Client $c) => $c->webhooks->deliveryFailures(['sessionId' => 's1', 'limit' => 5, 'offset' => 10]),
+                'GET',
+                '/api/webhooks/delivery-failures',
+                ['sessionId' => 's1', 'limit' => '5', 'offset' => '10'],
+                null,
+            ],
+            'chats->subscribePresence' => [
+                fn (Client $c) => $c->chats->subscribePresence('s1', ['chatId' => 'a@c.us']),
+                'POST',
+                '/api/sessions/s1/presence/subscribe',
+                [],
+                ['chatId' => 'a@c.us'],
+            ],
+            'chats->getPresence' => [fn (Client $c) => $c->chats->getPresence('s1', 'a@c.us'), 'GET', '/api/sessions/s1/presence/a@c.us', [], null],
+            'status->fromContact' => [fn (Client $c) => $c->status->fromContact('s1', 'a@c.us'), 'GET', '/api/sessions/s1/status/a@c.us', [], null],
+            'labels->chats' => [fn (Client $c) => $c->labels->chats('s1', 'l1'), 'GET', '/api/sessions/s1/labels/l1/chats', [], null],
+            'groups->joinInfo' => [fn (Client $c) => $c->groups->joinInfo('s1', 'INVITE'), 'GET', '/api/sessions/s1/groups/join-info', ['code' => 'INVITE'], null],
+        ];
     }
 
     private function assertRequest(MockBackend $backend, string $method, string $path): void

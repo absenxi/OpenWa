@@ -1,8 +1,3 @@
-// StorageService (imported transitively by the infra controllers) pulls in `archiver`
-// v8, which is ESM-only and cannot be parsed by ts-jest. The controller logic
-// under test never touches archiver, so a lightweight stub is sufficient.
-jest.mock('archiver', () => ({ default: jest.fn() }));
-
 // saveConfig writes the generated env via fs.writeFileSync and reads the existing file
 // via fs.existsSync/readFileSync; mock those so tests assert produced content without
 // touching the filesystem. existsSync defaults to false (no prior config) — except for
@@ -43,6 +38,7 @@ import { WebhookOutboxEvent } from '../webhook/entities/webhook-outbox-event.ent
 import { WebhookOutboxService } from '../webhook/webhook-outbox.service';
 import { IntegrationDeliveryFailure } from '../integration/entities/integration-delivery-failure.entity';
 import { StatusUpdate } from '../status-store/entities/status-update.entity';
+import { SendIdempotencyKey } from '../message/entities/send-idempotency-key.entity';
 import { AutomationRule } from '../automation/entities/automation-rule.entity';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { ScopeBindingService } from '../integration/scope-binding.service';
@@ -85,6 +81,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         IntegrationDeliveryFailure,
         StatusUpdate,
         AutomationRule,
+        SendIdempotencyKey,
       ],
       synchronize: true,
     });
@@ -157,6 +154,40 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
 
     expect((await ds.getRepository(Session).findOneByOrFail({ id: 's1' })).desiredState).toBe('stopped');
     expect((await ds.getRepository(Session).findOneByOrFail({ id: 's2' })).desiredState).toBeNull();
+  });
+
+  it('drops the send idempotency claims of a session the restore removes and keeps those of one it restores', async () => {
+    await seedSession('s1');
+    await seedSession('s2');
+    const claims = ds.getRepository(SendIdempotencyKey);
+    for (const sessionId of ['s1', 's2']) {
+      await claims.save(
+        claims.create({
+          sessionId,
+          idempotencyKey: 'order-42',
+          route: 'send-text',
+          requestHash: 'h',
+          state: 'completed',
+          responseBody: { messageId: `sent-by-${sessionId}` },
+          expiresAt: new Date(Date.now() + 3_600_000),
+        }),
+      );
+    }
+    const both = await controller.exportData();
+    const onlyS2 = {
+      tables: {
+        ...both.tables,
+        sessions: (both.tables.sessions as unknown as Array<{ id: string }>).filter(row => row.id === 's2'),
+      },
+    };
+
+    expect(await controller.importData(onlyS2 as never)).toMatchObject({ imported: true });
+    expect((await claims.find()).map(claim => claim.sessionId)).toEqual(['s2']);
+
+    // A later restore that brings s1 back must not answer a retried send with the old stored response.
+    expect(await controller.importData({ tables: both.tables })).toMatchObject({ imported: true });
+    expect(await claims.findOneBy({ sessionId: 's1' })).toBeNull();
+    expect(await claims.findOneBy({ sessionId: 's2' })).not.toBeNull();
   });
 
   it('carries LIVE claims forward by their remaining time, including a peer node’s', async () => {
@@ -467,6 +498,62 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     expect(held).toBe(0);
   });
 
+  describe('gives the query runner back when the transaction never opens', () => {
+    const watchRunners = (prepare: (runner: ReturnType<DataSource['createQueryRunner']>) => void) => {
+      const releases: jest.SpyInstance[] = [];
+      const realCreate = ds.createQueryRunner.bind(ds);
+      jest.spyOn(ds, 'createQueryRunner').mockImplementation((...args: Parameters<typeof realCreate>) => {
+        const runner = realCreate(...args);
+        prepare(runner);
+        releases.push(jest.spyOn(runner, 'release'));
+        return runner;
+      });
+      return releases;
+    };
+
+    it('when BEGIN fails', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      const releases = watchRunners(runner => {
+        runner.startTransaction = () => Promise.reject(new Error('BEGIN failed'));
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toThrow('BEGIN failed');
+
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
+    });
+
+    it('when another transaction already holds the connection', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      const releases = watchRunners(runner => {
+        Object.defineProperty(runner, 'isTransactionActive', { value: true });
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toMatchObject({
+        response: { code: 'IMPORT_NESTED_TRANSACTION' },
+      });
+
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
+    });
+
+    it('and still reports the failure of BEGIN when giving the runner back fails too', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      watchRunners(runner => {
+        runner.startTransaction = () => Promise.reject(new Error('BEGIN failed'));
+        runner.release = () => Promise.reject(new Error('release failed'));
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toThrow('BEGIN failed');
+      jest.restoreAllMocks();
+    });
+  });
+
   it('does not suspend loss detection on a dialect where each query runner has its own connection', async () => {
     await seedSession('s1');
     const dump = await controller.exportData();
@@ -540,10 +627,16 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     // better-sqlite3 hands out one runner per DataSource, so the patch is undone on that instance.
     const runner = ds.createQueryRunner();
     const realQuery = runner.query.bind(runner);
+    const sessionSettings: string[] = [];
     jest.spyOn(ds, 'createQueryRunner').mockImplementation(() => {
       let aborted = false;
       runner.query = ((...callArgs: Parameters<typeof realQuery>) => {
         const sql = callArgs[0];
+        // PostgreSQL accepts the transaction-local settings the import opens with; SQLite has no SET.
+        if (/^SET LOCAL /.test(sql)) {
+          sessionSettings.push(sql);
+          return Promise.resolve([]);
+        }
         if (aborted && sql !== 'ROLLBACK') {
           return Promise.reject(
             new Error('current transaction is aborted, commands ignored until end of transaction block'),
@@ -572,6 +665,9 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
       'Failed to import session s1: duplicate key value violates unique constraint "PK_sessions"',
     ]);
     expect((await ds.getRepository(Session).find()).map(s => s.id).sort()).toEqual(['s1', 's2']);
+    // The clears scale with the live tables, so the runtime statement timeout is lifted for this
+    // transaction (a lock wait keeps its bound).
+    expect(sessionSettings).toEqual(['SET LOCAL statement_timeout = 0', 'SET LOCAL lock_timeout = 30000']);
   });
 
   it('leaves a session that had no claim unclaimed rather than inventing one', async () => {
@@ -1515,7 +1611,7 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
   it('restores lid_mappings instead of dropping them on a backup→restore', async () => {
     await seedSession('s1');
     const lidRepo = ds.getRepository(LidMapping);
-    await lidRepo.save(lidRepo.create({ lid: '111', phone: '628111', sessionId: 's1' }));
+    await lidRepo.save(lidRepo.create({ lid: '111', phone: '628111', sessionId: 's1', isReported: true }));
     await lidRepo.save(lidRepo.create({ lid: '222', phone: null, sessionId: 's1' })); // negative cache
 
     const dump = await controller.exportData();
@@ -1530,6 +1626,14 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
     expect(await lidRepo.count()).toBe(2);
     expect((await lidRepo.findOneByOrFail({ lid: '111' })).phone).toBe('628111');
     expect((await lidRepo.findOneByOrFail({ lid: '222' })).phone).toBeNull();
+    expect((await lidRepo.findOneByOrFail({ lid: '111' })).isReported).toBe(true);
+    expect((await lidRepo.findOneByOrFail({ lid: '222' })).isReported).toBe(false);
+
+    const mappings = (dump.tables as unknown as { lidMappings: { isReported?: boolean | number }[] }).lidMappings;
+    for (const mapping of mappings) delete mapping.isReported;
+    const legacy = await controller.importData({ tables: dump.tables });
+    expect(legacy.warnings).toEqual([]);
+    expect((await lidRepo.findOneByOrFail({ lid: '111' })).isReported).toBe(false);
   });
 
   // Restoring ONTO the instance that produced the archive is the rollback flow, and it is the one the
@@ -2388,6 +2492,42 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
       ],
     );
     expect(await ds.query('SELECT lid, phone FROM lid_mappings')).toEqual([{ lid: '3', phone: '628123' }]);
+  });
+
+  // Boot no longer converts the raw whatsapp-web.js tokens on a migration-managed database, so an archive taken
+  // before the neutral vocabulary has to be converted by the import that restores it.
+  it('converts the raw message types of a restored archive and leaves the neutral ones alone', async () => {
+    await seedSession('s1');
+    const dump = await build().exportData();
+    const at = dump.tables.sessions[0].updatedAt;
+    const message = (id: string, type: string) => ({
+      id,
+      sessionId: 's1',
+      waMessageId: `W-${id}`,
+      chatId: 'c@c.us',
+      chatName: null,
+      author: null,
+      from: 'c@c.us',
+      to: 'me@c.us',
+      body: 'hello',
+      type,
+      direction: MessageDirection.INCOMING,
+      timestamp: 1,
+      metadata: null,
+      status: MessageStatus.DELIVERED,
+      createdAt: at,
+      mediaPath: null,
+      mediaMimetype: null,
+    });
+    const types = ['chat', 'ptt', 'vcard', 'multi_vcard', 'image', 'call_log', 'text'];
+
+    const res = await build().importData({
+      tables: { ...dump.tables, messages: types.map((type, i) => message(`m${i}`, type)) },
+    });
+
+    expect(res.imported).toBe(true);
+    const stored = await ds.query<Array<{ id: string; type: string }>>('SELECT id, type FROM messages ORDER BY id');
+    expect(stored.map(row => row.type)).toEqual(['text', 'voice', 'contact', 'contact', 'image', 'call_log', 'text']);
   });
 
   it('exports and restores automation_rules, which the session wipe would otherwise cascade away', async () => {

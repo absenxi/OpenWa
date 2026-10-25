@@ -5,6 +5,7 @@ import {
   type IncomingMessage,
 } from '../interfaces/whatsapp-engine.interface';
 import { type createLogger } from '../../common/services/logger.service';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { type WhatsAppWebJsConfig } from './whatsapp-web-js.adapter';
 import { toCapturedPageError } from './wwebjs-lifecycle';
@@ -18,10 +19,17 @@ import { toCapturedPageError } from './wwebjs-lifecycle';
  */
 export interface WwebjsEngineHost {
   ensureReady(): void;
+  /** The live client; throws EngineNotReadyError when the session is no longer ready or the client is gone. */
   getClient(): Client;
   readonly logger: ReturnType<typeof createLogger>;
   isPageTransportError(error: unknown): boolean;
   reportIfPageTransportError(error: unknown, context: string): void;
+  /**
+   * For a best-effort read that carries on after a failure: reports a death only once puppeteer's page or
+   * browser reads gone (it is given a moment to), never on the error's text alone. Optional so a host built
+   * without it keeps the text-free behaviour of simply carrying on.
+   */
+  reportOnceGone?(error: unknown, context: string): Promise<void>;
   ensureNotChannelRecipient(chatId: string): void;
   getNumberId(number: string): Promise<string | null>;
   capInboundMediaFor(
@@ -32,6 +40,18 @@ export interface WwebjsEngineHost {
   readonly config: WhatsAppWebJsConfig;
   /** Live callbacks bag — read per event, since initialize() installs it after delegates are built. */
   getCallbacks(): EngineEventCallbacks;
+}
+
+/**
+ * The client of a send or status path, read after ensureReady() and any awaits since (a recipient lookup, a
+ * media fetch). The adapter's getClient already refuses a session that is not ready; this keeps a host that
+ * still has no client from handing the send a null typed as a Client, which would die as a TypeError 500 and
+ * count toward the send breaker.
+ */
+export function requireClient(host: WwebjsEngineHost): Client {
+  const client = host.getClient() as Client | null | undefined;
+  if (!client) throw new EngineNotReadyError();
+  return client;
 }
 
 /**
@@ -78,8 +98,9 @@ export async function reportPageDeath<T>(host: WwebjsEngineHost, context: string
     // Web threw in the page reaches the caller with its reason. A no-op for every other error.
     const mapped = toCapturedPageError(error);
     if (mapped !== error) {
-      // The mapped error is an HttpException, which Nest does not log, and the status path logs
-      // nothing of its own: this is the one line that keeps the full in-page summary.
+      // The mapped error is an HttpException, which Nest does not log, and a status post's own log line
+      // (StatusService.recordedPost) carries only the session and kind: this is the line that keeps the
+      // full in-page summary.
       host.logger.warn(`WhatsApp Web threw during ${context}`, {
         sessionId: host.config.sessionId,
         cause: (error as Error).message,
