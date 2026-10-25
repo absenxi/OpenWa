@@ -39,6 +39,9 @@ concurrency:
 env:
   UPSTREAM_REPO: rmyndharis/OpenWA
   SYNC_BRANCH: sync/upstream
+  # The previous sync PR was squash-merged. Its sync branch had this upstream parent, but the
+  # squash commit on main did not retain that parent. The first repaired sync records it again.
+  UPSTREAM_REPAIR_BASE: e9656853d0706eede3aae3fa73315d2a9e5dcc73
 
 jobs:
   sync:
@@ -75,7 +78,22 @@ jobs:
           git config rerere.enabled true
           git config rerere.autoupdate true
 
-          if ! git merge --no-ff --no-edit upstream/main; then
+          # Repair the ancestry lost when the previous sync PR was squash-merged. This is a one-time
+          # ours merge: it changes no files, but makes the next merge compare against the upstream
+          # commit already represented by the current tree instead of replaying its entire history.
+          if ! git merge-base --is-ancestor "$UPSTREAM_REPAIR_BASE" HEAD; then
+            if ! git merge-base --is-ancestor "$UPSTREAM_REPAIR_BASE" upstream/main; then
+              echo "::error::Upstream repair base is not an ancestor of upstream/main."
+              exit 1
+            fi
+            git merge --no-ff --no-commit -s ours "$UPSTREAM_REPAIR_BASE"
+            git commit -m 'chore(sync): restore upstream ancestry'
+            behind=$(git rev-list --count "HEAD..upstream/main")
+          fi
+
+          # Keep fork-owned conflict hunks during the recovery while still taking every
+          # non-conflicting upstream change, then create a real merge commit.
+          if ! git merge --no-ff --no-commit --no-edit -X ours upstream/main; then
             echo "::warning::Merge has conflicts; trying safe automatic resolution rules."
 
             # package-lock.json is generated data. Regenerate it from the merged package.json
@@ -125,8 +143,28 @@ jobs:
               exit 1
             fi
 
-            git commit --no-edit
           fi
+
+          # Lockfiles are generated data. Rebuild each JavaScript lockfile whenever its manifest or
+          # lockfile changed in the merge, including changes that were resolved without conflicts.
+          for package_dir in . dashboard sdk/javascript; do
+            if [ "$package_dir" = '.' ]; then
+              manifest='package.json'
+              lockfile='package-lock.json'
+            else
+              manifest="$package_dir/package.json"
+              lockfile="$package_dir/package-lock.json"
+            fi
+
+            if git diff --quiet HEAD -- "$manifest" "$lockfile"; then
+              continue
+            fi
+
+            (cd "$package_dir" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+            git add "$lockfile"
+          done
+
+          git commit --no-edit
 
           # Force-push: the branch exists only to carry this PR, and upstream is the sole writer of
           # its content, so a stale previous sync is always safe to replace.
