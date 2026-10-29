@@ -39,10 +39,11 @@
 #   BOOTSTRAP_KEY_FILE  the plaintext admin key to archive (default: <data dir>/.api-key)
 #                     These paths resolve through the same layers as the databases.
 #   POSTGRES_SCHEMA   for postgres: a schema other than public is dumped alone (the database may hold
-#                     other applications' schemas), with the pg_trgm and unaccent extensions, behind a
-#                     prelude that moves an existing copy of the schema aside on load; database.schema
-#                     in the archive names it. That dump needs pg_dump 14 or newer (the image ships
-#                     17), which the run checks first. public dumps the whole database, as before.
+#                     other applications' schemas), with the pg_trgm and unaccent extensions, and
+#                     pgcrypto when it lives in that schema (PostgreSQL 12 and older), behind a prelude
+#                     that moves an existing copy of the schema aside on load; database.schema in the
+#                     archive names it. That dump needs pg_dump 14 or newer (the image ships 17), which
+#                     the run checks first. public dumps the whole database, as before.
 #   For postgres: DATABASE_URL, or DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME
 #                     DATABASE_URL is read by this script only (the app uses the DATABASE_* keys)
 #                     and wins over them when set. It is passed to pg_dump as an argument, which
@@ -218,26 +219,45 @@ backup_sqlite() {
   fi
 }
 
-# The SQL a schema-scoped dump starts with. Loaded into a database that already holds the schema (the one
-# the dump came from), it moves that schema aside as <schema>_pre_restore_<time>, and drops pg_trgm and
-# unaccent when they moved with it, with the copy's trigram index on pg_trgm, so the dump can create them
-# in the schema again. Not CASCADE: extensions are per database, so an object in another schema may use
-# these, and it then fails the load, which changes nothing, rather than going with them. In an empty
-# database it does nothing. The name was checked with openwa_pg_schema_valid, so it needs no quoting here.
+# pg_schema_prelude <schema> [pgcrypto] - the SQL a schema-scoped dump starts with. Loaded into a database
+# that already holds the schema (the one the dump came from), it moves that schema aside as
+# <schema>_pre_restore_<time>, and drops pg_trgm and unaccent when they moved with it, and pgcrypto when the
+# dump carries it, with what the copy hangs on them: its trigram index on pg_trgm, and the column defaults
+# that call pgcrypto's gen_random_uuid() (PostgreSQL 12 and older). The dump can then create them in the
+# schema again, where its own defaults call them by name. Not CASCADE: extensions are per database, so an
+# object in another schema may use these, and it then fails the load, which changes nothing, rather than
+# going with them. In an empty database it does nothing. The name was checked with openwa_pg_schema_valid,
+# so it needs no quoting here.
 pg_schema_prelude() {
+  local extensions="'pg_trgm', 'unaccent'"
+  if [ -n "${2:-}" ]; then
+    extensions="$extensions, '$2'"
+  fi
   cat <<EOF
 -- Added by backup.sh: this dump holds schema $1 only. An existing $1 is moved aside before it loads.
 DO \$openwa\$
 DECLARE
   aside text := left('$1', 36) || '_pre_restore_' || to_char(clock_timestamp(), 'YYYYMMDDHH24MISS');
   ext text;
+  col record;
 BEGIN
   IF to_regnamespace('$1') IS NOT NULL THEN
     EXECUTE format('ALTER SCHEMA %I RENAME TO %I', '$1', aside);
     FOR ext IN SELECT extname FROM pg_extension
-      WHERE extname IN ('pg_trgm', 'unaccent') AND extnamespace = to_regnamespace(aside) LOOP
+      WHERE extname IN ($extensions) AND extnamespace = to_regnamespace(aside) LOOP
       IF ext = 'pg_trgm' THEN
         EXECUTE format('DROP INDEX IF EXISTS %I.%I', aside, 'idx_messages_body_trgm');
+      ELSIF ext = 'pgcrypto' THEN
+        FOR col IN SELECT DISTINCT c.relname, a.attname FROM pg_attrdef d
+          JOIN pg_class c ON c.oid = d.adrelid AND c.relnamespace = to_regnamespace(aside)
+          JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+          JOIN pg_depend f ON f.classid = 'pg_attrdef'::regclass AND f.objid = d.oid
+            AND f.refclassid = 'pg_proc'::regclass
+          JOIN pg_depend m ON m.classid = 'pg_proc'::regclass AND m.objid = f.refobjid AND m.deptype = 'e'
+            AND m.refclassid = 'pg_extension'::regclass
+          JOIN pg_extension e ON e.oid = m.refobjid AND e.extname = 'pgcrypto' LOOP
+          EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I DROP DEFAULT', aside, col.relname, col.attname);
+        END LOOP;
       END IF;
       EXECUTE format('DROP EXTENSION %I', ext);
     END LOOP;
@@ -250,6 +270,11 @@ EOF
 # pg_dump_data <connection arguments...> - the data store's dump: the whole database for the public
 # schema, else POSTGRES_SCHEMA alone (PG_DUMP_SCHEMA) behind its prelude, with the extensions the app's
 # search index uses. plpgsql always matches, so the list never fails pg_dump where the others are absent.
+# pgcrypto joins them only when it lives in that schema: on PostgreSQL 12 and older the migrations create
+# it there, and the id defaults call its gen_random_uuid() by that schema's name. From 13 the function is
+# core and the app never uses pgcrypto, so one in another schema stays out, and a load into an empty
+# database does not need that schema. A schema-only probe over the same connection reads where it lives
+# from pg_dump's CREATE EXTENSION line; a failed probe fails the backup.
 # No comments: COMMENT ON EXTENSION needs the extension's owner even where CREATE EXTENSION IF NOT EXISTS
 # skipped one that exists, and the app writes no comment of its own.
 pg_dump_data() {
@@ -257,8 +282,14 @@ pg_dump_data() {
     pg_dump "$@"
     return
   fi
-  pg_schema_prelude "$PG_DUMP_SCHEMA"
-  pg_dump -n "$PG_DUMP_SCHEMA" --no-comments -e plpgsql -e pg_trgm -e unaccent "$@"
+  local probe extensions=(-e plpgsql -e pg_trgm -e unaccent) pgcrypto=""
+  probe="$(pg_dump --schema-only -n "$PG_DUMP_SCHEMA" -e plpgsql -e pgcrypto "$@")"
+  if grep -Eqx "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA \"?$PG_DUMP_SCHEMA\"?;" <<<"$probe"; then
+    pgcrypto=pgcrypto
+    extensions+=(-e pgcrypto)
+  fi
+  pg_schema_prelude "$PG_DUMP_SCHEMA" "$pgcrypto"
+  pg_dump -n "$PG_DUMP_SCHEMA" --no-comments "${extensions[@]}" "$@"
 }
 
 # Members the finished archive MUST contain (relative tar paths). A run that cannot stage any of

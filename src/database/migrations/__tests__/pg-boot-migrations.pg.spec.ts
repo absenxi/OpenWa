@@ -505,5 +505,155 @@ const hasTool = (tool: string): boolean => spawnSync('sh', ['-c', `command -v ${
       },
       180_000,
     );
+
+    // pgcrypto in the app schema is the PostgreSQL 12 layout; one in a schema of its own (a platform's `extensions`)
+    // is unused from 13 on, and the archive must load without it, as it did before pgcrypto was ever dumped.
+    it.each(['app', 'extensions'])(
+      'with pgcrypto in the %s schema: loads into an empty and into its own database',
+      async placement => {
+        const inApp = placement === 'app';
+        const role = `shared_role_${process.pid}_pgcrypto_${placement}`;
+        const source = `shared_src_${process.pid}_pgcrypto_${placement}`;
+        const target = `shared_dst_${process.pid}_pgcrypto_${placement}`;
+        const work = mkdtempSync(path.join(tmpdir(), 'openwa-schema-backup-'));
+        const scoped = async (database: string): Promise<DataSource> =>
+          new DataSource({ type: 'postgres', host, port, ...superuser, database }).initialize();
+        const tools = { PATH: process.env.PATH, PG_HOST_PORT: process.env.PG_HOST_PORT };
+        try {
+          await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${role}'`);
+          await admin.query(`CREATE DATABASE "${source}"`);
+          await admin.query(`CREATE DATABASE "${target}"`);
+          const setup = await scoped(source);
+          await setup.query(`CREATE SCHEMA "${schema}" AUTHORIZATION "${role}"`);
+          await setup.query(`GRANT CREATE ON DATABASE "${source}" TO "${role}"`);
+          if (!inApp) {
+            await setup.query(`CREATE SCHEMA extensions`);
+            await setup.query(`CREATE EXTENSION pgcrypto WITH SCHEMA extensions`);
+          }
+          await setup.destroy();
+
+          const app = await boot(role, source);
+          if (inApp) {
+            // Before PostgreSQL 13 gen_random_uuid() is pgcrypto's, and the migrations create pgcrypto under the app's
+            // search_path, in its schema, so every id default calls that schema's copy by name. Rebuilt here on 13+.
+            await app.query(`CREATE EXTENSION pgcrypto WITH SCHEMA "${schema}"`);
+            const ids = await app.query<Array<{ name: string }>>(
+              `SELECT table_name AS name FROM information_schema.columns
+              WHERE table_schema = $1 AND column_name = 'id' AND column_default LIKE '%gen_random_uuid()%'`,
+              [schema],
+            );
+            expect(ids.length).toBeGreaterThan(0);
+            for (const { name } of ids) {
+              await app.query(
+                `ALTER TABLE "${schema}"."${name}" ALTER COLUMN id SET DEFAULT "${schema}".gen_random_uuid()::varchar`,
+              );
+            }
+          }
+          await app.query(`INSERT INTO sessions (name, status, config) VALUES ('one', 'disconnected', '{}')`);
+          await app.destroy();
+
+          mkdirSync(path.join(work, 'src', 'data'), { recursive: true });
+          mkdirSync(path.join(work, 'dst'));
+          writeFileSync(path.join(work, 'src', 'data', 'main.sqlite'), '');
+          const backup = spawnSync('bash', [path.join(repo, 'scripts', 'backup.sh')], {
+            cwd: path.join(work, 'src'),
+            encoding: 'utf8',
+            env: {
+              ...tools,
+              HOME: work,
+              BACKUP_DIR: path.join(work, 'out'),
+              DATABASE_TYPE: 'postgres',
+              POSTGRES_SCHEMA: schema,
+              DATABASE_HOST: host,
+              DATABASE_PORT: String(port),
+              DATABASE_USERNAME: role,
+              DATABASE_PASSWORD: role,
+              DATABASE_NAME: source,
+            },
+          });
+          expect(backup.stderr + backup.stdout).toContain('Backup complete');
+          const [archive] = readdirSync(path.join(work, 'out')).map(name => path.join(work, 'out', name));
+          const restore = spawnSync('bash', [path.join(repo, 'scripts', 'restore.sh'), archive], {
+            cwd: path.join(work, 'dst'),
+            encoding: 'utf8',
+            env: { PATH: process.env.PATH, HOME: work },
+          });
+          const load = restore.stdout
+            .split('\n')
+            .find(line => line.includes('psql --single-transaction'))
+            ?.replace(/^\[restore\]\s+/, '');
+          expect(load).toBeDefined();
+
+          // Into an empty database as the superuser, and into its own database as the app's role. The empty database
+          // has no `extensions` schema.
+          for (const [user, password, database] of [
+            [superuser.username, superuser.password, target],
+            [role, role, source],
+          ]) {
+            const run = spawnSync('bash', ['-c', load!], {
+              cwd: path.join(work, 'dst'),
+              encoding: 'utf8',
+              env: { ...tools, DATABASE_URL: `postgres://${user}:${password}@${host}:${port}/${database}` },
+            });
+            const errors = run.stderr.split('\n').filter(line => line.includes('ERROR'));
+            expect({ database, status: run.status, errors }).toEqual({ database, status: 0, errors: [] });
+            const check = await scoped(database);
+            try {
+              const [row] = await check.query<unknown[]>(
+                `SELECT (SELECT count(*)::int FROM "${schema}".sessions) AS sessions,
+                      (SELECT column_default FROM information_schema.columns
+                        WHERE table_schema = $1 AND table_name = 'sessions' AND column_name = 'id') AS "default",
+                      (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pgcrypto') AS home`,
+                [schema],
+              );
+              const [inserted] = await check.query<Array<{ id: number }>>(
+                `INSERT INTO "${schema}".sessions (name, status, config) VALUES ('two', 'disconnected', '{}')
+               RETURNING length(id) AS id`,
+              );
+              expect({ database, ...(row as object), inserted: inserted.id }).toEqual({
+                database,
+                sessions: 1,
+                default: inApp
+                  ? `(${schema}.gen_random_uuid())::character varying`
+                  : '(gen_random_uuid())::character varying',
+                home: inApp ? schema : database === source ? 'extensions' : null,
+                inserted: 36,
+              });
+            } finally {
+              await check.destroy();
+            }
+            const restored = await boot(role, database);
+            await restored.destroy();
+          }
+          // The copy moved aside keeps its rows. With pgcrypto in the schema its id defaults went with the pgcrypto it
+          // held, as nothing else could take the dump's own pgcrypto into the schema; otherwise they stay.
+          const after = await scoped(source);
+          try {
+            const [{ aside }] = await after.query<Array<{ aside: string }>>(
+              `SELECT nspname AS aside FROM pg_namespace WHERE nspname LIKE '${schema}_pre_restore_%'`,
+            );
+            const [copy] = await after.query<unknown[]>(
+              `SELECT (SELECT count(*)::int FROM "${aside}".sessions) AS sessions,
+                    (SELECT column_default FROM information_schema.columns
+                      WHERE table_schema = $1 AND table_name = 'sessions' AND column_name = 'id') AS "default"`,
+              [aside],
+            );
+            expect(copy).toEqual({ sessions: 1, default: inApp ? null : '(gen_random_uuid())::character varying' });
+          } finally {
+            await after.destroy();
+          }
+          const dump = execFileSync('tar', ['-xzOf', archive, './database.sql'], { encoding: 'utf8' });
+          expect(dump.match(/^CREATE EXTENSION IF NOT EXISTS pgcrypto\b.*$/m)?.[0] ?? null).toBe(
+            inApp ? `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA ${schema};` : null,
+          );
+        } finally {
+          rmSync(work, { recursive: true, force: true });
+          await admin.query(`DROP DATABASE IF EXISTS "${source}" WITH (FORCE)`);
+          await admin.query(`DROP DATABASE IF EXISTS "${target}" WITH (FORCE)`);
+          await admin.query(`DROP ROLE IF EXISTS "${role}"`);
+        }
+      },
+      180_000,
+    );
   },
 );
