@@ -232,9 +232,12 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
   if (!mimetype.startsWith('image/')) {
     // Deliberately a 400 rather than EngineNotSupportedError: the capability IS supported, this
     // particular payload cannot become a sticker. A 501 would report the wrong thing and would also
-    // make the row look unavailable to the parity gate's throw-scan.
-    throw new BadRequestException(
-      `A sticker must be a WebP image, or an image this gateway can convert to one. Received '${mimetype}'.`,
+    // make the row look unavailable to the parity gate's throw-scan. Like every refusal here it comes
+    // before anything reaches WhatsApp, so it carries markNothingSent.
+    throw markNothingSent(
+      new BadRequestException(
+        `A sticker must be a WebP image, or an image this gateway can convert to one. Received '${mimetype}'.`,
+      ),
     );
   }
   // Imported lazily so an unusable `sharp` (a native binary that will not build or load on an older
@@ -251,8 +254,10 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
       // same slot as the pipeline.
       const { pages = 1 } = await image.metadata();
       if (pages > MAX_STICKER_FRAMES) {
-        throw new BadRequestException(
-          `The sticker animation has ${pages} frames; at most ${MAX_STICKER_FRAMES} can be converted.`,
+        throw markNothingSent(
+          new BadRequestException(
+            `The sticker animation has ${pages} frames; at most ${MAX_STICKER_FRAMES} can be converted.`,
+          ),
         );
       }
       return image
@@ -264,8 +269,10 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
     if (error instanceof BadRequestException) throw error;
     // Bytes that do not decode as the image they claim to be. Refuse before the socket rather than
     // ship them mislabelled — that is the whole point.
-    throw new BadRequestException(
-      `The sticker image could not be converted to WebP: ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The sticker image could not be converted to WebP: ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }

@@ -126,6 +126,8 @@ describe('a keyed send refused before anything reaches WhatsApp', () => {
       sendTextMessage: (...args: Parameters<BaileysMessaging['sendTextMessage']>) => messaging.sendTextMessage(...args),
       sendImageMessage: (...args: Parameters<BaileysMessaging['sendImageMessage']>) =>
         messaging.sendImageMessage(...args),
+      sendStickerMessage: (...args: Parameters<BaileysMessaging['sendStickerMessage']>) =>
+        messaging.sendStickerMessage(...args),
     } as unknown as IWhatsAppEngine);
     release = jest.fn();
     const module = await Test.createTestingModule({
@@ -166,7 +168,8 @@ describe('a keyed send refused before anything reaches WhatsApp', () => {
     await ds.destroy();
   });
 
-  const withKey = async (route: 'sendText' | 'sendImage', body: object): Promise<unknown> => {
+  type Route = 'sendText' | 'sendImage' | 'sendSticker';
+  const withKey = async (route: Route, body: object): Promise<unknown> => {
     const context = {
       getType: () => 'http',
       getHandler: () => ({ name: route }),
@@ -175,11 +178,10 @@ describe('a keyed send refused before anything reaches WhatsApp', () => {
         getResponse: () => ({ setHeader: jest.fn() }),
       }),
     } as unknown as ExecutionContext;
-    const send = () =>
-      route === 'sendText' ? service.sendText('sess-1', body as never) : service.sendImage('sess-1', body as never);
+    const send = () => service[route]('sess-1', body as never);
     return lastValueFrom(await interceptor.intercept(context, { handle: () => from(send()) }));
   };
-  const failure = (route: 'sendText' | 'sendImage', body: object): Promise<unknown> =>
+  const failure = (route: Route, body: object): Promise<unknown> =>
     withKey(route, body).then(
       () => {
         throw new Error('expected the send to fail');
@@ -343,6 +345,21 @@ describe('a keyed send refused before anything reaches WhatsApp', () => {
     expect(error).toBeInstanceOf(BadRequestException);
     expect(client.sendMessage).not.toHaveBeenCalled();
     expect(await keyState()).toBe('absent');
+  });
+
+  it.each([
+    ['bytes that do not decode', 'image/png', Buffer.from('nope'), /could not be converted to WebP/],
+    ['a type that is no image', 'application/pdf', Buffer.from('%PDF-1.4'), /Received 'application\/pdf'/],
+  ])('send-sticker with %s keeps its 400 and frees the key on Baileys', async (_label, mimetype, bytes, message) => {
+    const body = { chatId: '628123456789@c.us', base64: bytes.toString('base64'), mimetype };
+
+    const error = await failure('sendSticker', body);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toMatch(message);
+    expect(sock.sendMessage).not.toHaveBeenCalled();
+    expect(await keyState()).toBe('absent');
+    expect(await failure('sendSticker', body)).toBeInstanceOf(BadRequestException);
   });
 
   // Control: a failure from the socket itself proves nothing, so the key stays taken.
