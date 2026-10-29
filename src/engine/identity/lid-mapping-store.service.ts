@@ -445,11 +445,12 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       (phone === null || !sessionId || this.seenBy.get(lid)?.has(sessionId));
     // This report gives the lid a phone this node did not hold for it, a new or changed pairing or one only
     // display data had, so it owes a second-lid check; a lid outside the cache cannot be told from a new one.
-    // Any other report carries the check an earlier report of the lid still owes, in flight or not.
-    const gaining = phone !== null && (cached !== phone || this.unreported.has(lid));
-    const owed = gaining
-      ? { phone, sessionId: sessionId ?? null, queued: false }
-      : (this.unsettledWrites.get(lid)?.check ?? this.secondLidOwed.get(lid));
+    // Any other report carries the check an earlier report of the lid still owes, in flight or not, unless that
+    // check names another phone (the cache read this one back from the table since): then it owes its own.
+    const earlier = this.unsettledWrites.get(lid)?.check ?? this.secondLidOwed.get(lid);
+    const gaining =
+      phone !== null && (cached !== phone || this.unreported.has(lid) || (!!earlier && earlier.phone !== phone));
+    const owed = gaining ? { phone, sessionId: sessionId ?? null, queued: false } : earlier;
     // A negative is not cached until the table has taken it: see clear().
     if (!seen && phone !== null) this.index(lid, phone, null);
     if (phone !== null) this.failedWrites.add(lid);

@@ -2962,6 +2962,35 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
     return { read, fail };
   }
 
+  // The new number's write and the current number's check read fail in one database hiccup; the mapping cache then
+  // drops the lid and reads it back from the table at the number it was checked for.
+  it('checks a lid again when the cache reads it back to the number whose check read failed', async () => {
+    const saved = process.env.LID_MAPPING_CACHE_MAX;
+    process.env.LID_MAPPING_CACHE_MAX = '3';
+    try {
+      const { repo, store, reports } = await watched([{ lid: '333', phone: '628777', sessionId: 's1' }]);
+      const { read, fail } = holdPhoneReads(repo);
+
+      await store.remember('222', '628777', 's2'); // lands; its check's read is held open
+      await until(() => fail.length > 0);
+      repo.upsert.mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+      await expect(store.remember('222', '628111', 's2')).resolves.toBe(false);
+      fail[0](new Error('Connection terminated unexpectedly'));
+      repo.find.mockImplementation(read);
+      for (const lid of ['901', '902', '903']) await store.remember(lid, `62800${lid}`, 's2');
+      expect(store.getCached('222')).toBeUndefined(); // the miss reads the row back
+      await until(() => store.getCached('222') === '628777');
+      await expect(store.remember('222', '628777', 's2')).resolves.toBe(true);
+      await until(() => reports.length > 0);
+
+      expect(repo.rows.filter(row => row.phone === '628777').map(row => row.lid)).toEqual(['333', '222']);
+      expect(reports).toEqual([{ phone: '628777', previousLid: '333', newLid: '222', sessionId: 's2' }]);
+    } finally {
+      if (saved === undefined) delete process.env.LID_MAPPING_CACHE_MAX;
+      else process.env.LID_MAPPING_CACHE_MAX = saved;
+    }
+  });
+
   // The lid's holder changed number while its earlier check was read, and one database hiccup failed both
   // that read and the write of the new number.
   it('keeps a newer owed check of a lid over the one whose read failed', async () => {
