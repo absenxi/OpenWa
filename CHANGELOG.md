@@ -54,12 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Show the caption of a Baileys photo, video or document, and the text of a disappearing or view-once message, in the chat list preview instead of a blank line.
 - Keep a Baileys chat list preview from taking an edit or delete sent by someone other than the message's author; in a group a delete from any member still counts, as an admin may delete.
 - Report `message.ack` only for messages the account sent, so reading a received message on the phone no longer marks it read (both engines).
-- Answer `409` "nothing to unlink" for a logout of a Baileys session that never linked, instead of a `502` that asked to retry.
+- Answer `409` "nothing to unlink" for a logout of a Baileys session with no linked device, instead of a `502` that asked to retry.
 - Show a QR on the next start of a Baileys session whose pairing code was never entered.
 - End the wait for a Baileys pairing code nobody enters after 5 minutes and show a new QR.
 - Bound the Baileys group invite-code read and revoke at 30 s like the other group calls.
 - Answer `503` (not sent) for a Baileys send or status post cut off by a closed connection, instead of an opaque `500`, handing back its pacing admission and a keyed send's `Idempotency-Key`.
-- List a Baileys chat again when a message arrives in the same second as its deletion.
+- Free a keyed send's `Idempotency-Key` when its media could not be fetched or read, or its Baileys connection was replaced before the write, so the retry is sent instead of answering `409 IDEMPOTENCY_OUTCOME_UNKNOWN`.
+- List a Baileys chat again, with its unread count, when a message arrives in the same second as its deletion.
 - Keep a Baileys receipt from one chat off another chat's message with the same id.
 - Answer the engine error instead of `400` "not on WhatsApp" for a whatsapp-web.js send whose recipient lookup did not answer, without counting it toward the send breaker.
 - Recycle a whatsapp-web.js session whose page reloaded without re-injecting its helpers once it has gone 3 minutes that way, without recycling a slow reload that did re-inject.
@@ -73,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name an unknown `LOG_FORMAT` at boot, with the format used instead.
 - Log a failed chmod of the generated env or bootstrap key file through the structured logger instead of a raw console line.
 - Boot through PgBouncer in session mode: the PostgreSQL statement timeout and a custom schema's search path are set after connect, as the time zone already was, instead of in the startup packet.
-- Back up only the configured non-public `POSTGRES_SCHEMA` with its search extensions, so a database shared with other applications no longer fails the backup or comes back with their schemas on restore.
+- Back up only the configured non-public `POSTGRES_SCHEMA` with its search extensions, and pgcrypto when it lives in that schema, so a database shared with other applications no longer fails the backup or comes back with their schemas on restore.
 - Stream chat and status media downloads from the store instead of reading the whole file into memory.
 - Drop the `archived` marker of media that retention deletes under `MESSAGE_INLINE_MEDIA=archive`.
 - Stop holding every S3 key in memory during the chat-media orphan sweep.
@@ -84,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hand a plugin config saved while the plugin was starting to the running plugin.
 - Refuse a plugin config, activation, enable or disable change the plugin registry cannot store, instead of reporting it applied and losing it at the next restart.
 - Empty a plugin's registry entry before its uninstall, so an entry the registry could not drop no longer hands its config, secrets and enable decision to a reinstall of the id after a restart.
+- Refuse a plugin config, per-session config or activation change with `409` while an uninstall of that plugin is unloading it.
 - Publish the `limit` and `offset` query parameters of the list routes as integers in `openapi.json`.
 - Java SDK: attach the Gson failure as the cause of the `OpenWAError` for a 2xx body it cannot read, now worded `Unexpected response body for <method> <path>` instead of `Non-JSON response`.
 - Keep nested dependency and build trees and a legacy `uploads/` directory out of the Docker build context.
@@ -98,23 +100,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Show refused webhook test statuses and API key role names in the dashboard language.
 - List and preview legacy single-brace placeholders on the dashboard Templates page, as the gateway still fills them.
 - Keep dashboard message search results open when focus returns within a moment.
-- Show the gateway's reason when a dashboard unlink of a Baileys session that never linked answers `409`.
+- Show the gateway's reason when a dashboard unlink of a Baileys session with no linked device answers `409`.
+- Show a warning on the dashboard Plugins page when an uninstall could not drop the plugin's registry entry.
 - Clear a dashboard pairing code once Baileys ends its unused five-minute wait and shows a new QR.
 - Retry a dashboard live-feed subscribe the gateway could not check or rate-limited, read again what it missed once it joins, and show the connection banner when it keeps failing.
 
 ### Upgrade notes (behavior changes)
 
-- A Baileys logout of a session that never linked answers `409` instead of `502`.
+- A Baileys logout of a session with no linked device answers `409` instead of `502`.
 - A Baileys send or status post cut off by a closed connection answers `503` where it answered `500`; a keyed send frees its `Idempotency-Key`, so a retry with the same key is accepted and sent, where the key stayed held.
+- A keyed send whose media could not be fetched or read, or whose Baileys connection was replaced before the write, frees its `Idempotency-Key`; a retry with the same key is sent where it answered `409 IDEMPOTENCY_OUTCOME_UNKNOWN`.
 - A whatsapp-web.js send whose recipient lookup does not answer answers `500` (`ENGINE_PAGE_ERROR`), or `409` when a page reload cut the lookup short, instead of `400`.
 - A plugin change the plugin registry cannot store answers `success: false` (config, per-session config, enable, disable) or `500` (`PUT /plugins/{id}/sessions`, and an uninstall, which then leaves the plugin running) where it answered success.
 - The `/events` gateway answers `INTERNAL_ERROR` when it cannot read the key store, where it answered `UNAUTHORIZED` and audited a failed key; a subscribe answered so joins nothing and keeps the socket, so send it again, and a handshake still disconnects.
-- A backup of a non-public `POSTGRES_SCHEMA` holds only that schema; restore it with the load `restore.sh` prints. Archives made earlier restore as before.
+- A backup of a non-public `POSTGRES_SCHEMA` holds only that schema and needs pg_dump 14 or newer; restore it with the load `restore.sh` prints. Archives made earlier restore as before.
 - A message sent through the API stores `from` as `<phone>@c.us` instead of the bare number; rows stored earlier keep their value and `from` filters match both.
 - Dashboard number fields refuse an entry of more than 15 digits, which they looked up or sent as one number; the bulk recipients list leaves such a line out.
 - On Baileys, `GET /api/sessions/{sessionId}/qr` answers `400` from 60 s after a pairing-code request until the new QR, where it served the QR from before the request, which could no longer link.
 - `message.ack` webhooks and socket events, and the plugin `message:ack` hook, no longer fire for a received message, and reading one on the phone no longer moves its stored status to `read`.
-- An uninstall that fails part-way (`400`) leaves the plugin installed but disabled, with its config, session activation and enable decision cleared, where it kept them.
+- An uninstall that fails part-way (`400`) leaves the plugin installed but disabled, with its config, session activation and enable decision cleared, where it kept them; it is audited as `plugin_uninstalled` with `partial: true`.
 - `message:persisted` fires again, with the same `id`, when an edit changes a stored message's text; upsert by `id`.
 - A second stop signal within 1 s of the first is ignored as the same stop; send it 1 s or more later to force exit 130.
 - Chat and status media downloads are streamed: `Content-Length` is sent only when the store reports a size, and a store failure after the first byte aborts the connection instead of answering `500`.
