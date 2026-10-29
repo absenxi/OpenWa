@@ -106,8 +106,8 @@ export class MessageController {
     description:
       'Filter by sender. A phone also matches group messages via the author field and any lid that resolves to it.',
   })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max messages to return (default 50)' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Offset for pagination' })
+  @ApiQuery({ name: 'limit', required: false, type: 'integer', description: 'Max messages to return (default 50)' })
+  @ApiQuery({ name: 'offset', required: false, type: 'integer', description: 'Offset for pagination' })
   @ApiQuery({
     name: 'inlineMedia',
     required: false,
@@ -647,7 +647,7 @@ export class MessageController {
   })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'chatId', description: 'Chat ID (e.g. 1234567890@c.us or groupId@g.us)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max messages to return (default 50)' })
+  @ApiQuery({ name: 'limit', required: false, type: 'integer', description: 'Max messages to return (default 50)' })
   @ApiQuery({
     name: 'includeMedia',
     required: false,
