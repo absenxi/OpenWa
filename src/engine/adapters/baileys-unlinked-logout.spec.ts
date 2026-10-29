@@ -69,13 +69,13 @@ describe('Baileys logout without a linked device', () => {
     fs.rmSync(path.dirname(authPath), { recursive: true, force: true });
   });
 
-  it('answers that a session which never linked has nothing to unlink, and removes nothing', async () => {
+  it('answers that a session with no linked device has nothing to unlink, and removes nothing', async () => {
     const { lifecycle, sock } = qrStage();
 
     const error = await failure(lifecycle.logout());
 
     expect(error).toBeInstanceOf(EngineNotReadyError);
-    expect((error as Error).message).toMatch(/never linked to WhatsApp, so there is nothing to unlink/);
+    expect((error as Error).message).toMatch(/has no linked WhatsApp device, so there is nothing to unlink/);
     expect(sock.query).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(authPath, 'creds.json'))).toBe(true);
     // Still stopped locally, as every logout attempt is.

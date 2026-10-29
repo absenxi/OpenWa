@@ -709,7 +709,7 @@ export class SessionEngineControls {
    * Throws a retryable BadGatewayException (502) carrying a stable `code: 'SESSION_LOGOUT_INCOMPLETE'`
    * when an accepted engine-backed attempt stopped locally but the unlink operation did NOT complete
    * — no identity/no send, no IQ acknowledgement, timeout/transport error, OR local credential
-   * cleanup failure. A Baileys session that never linked has nothing to unlink, so its engine refuses
+   * cleanup failure. A Baileys session with no linked device has nothing to unlink, so its engine refuses
    * with EngineNotReadyError, answered as that 409 after the same local teardown rather than as a 502
    * whose retry could only repeat. After EVERY engine-backed attempt (200, 409 OR 502) the session is torn down locally
    * (map reconciled, status DISCONNECTED) and `phone` is cleared so the boot auto-start does not
@@ -737,8 +737,8 @@ export class SessionEngineControls {
     // Announced by the write below rather than from the engine callback, as in stop().
     this.operatorTeardowns.set(id, engine);
     let unlinked: boolean;
-    // The teardown helper keeps only whether the call settled; the engine's refusal of a session that
-    // never linked is kept here so it can answer instead of the 502.
+    // The teardown helper keeps only whether the call settled; the engine's refusal of a session with no
+    // linked device is kept here so it can answer instead of the 502.
     let neverLinked: EngineNotReadyError | undefined;
     try {
       // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED

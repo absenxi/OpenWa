@@ -453,9 +453,10 @@ export class SessionController {
   @ApiResponse({
     status: 409,
     description:
-      'Baileys: the session never linked to WhatsApp, so there is nothing to unlink. It was stopped ' +
-      'locally and `phone` is cleared; no success audit is written. Start it to link a device, or delete it, ' +
-      'instead of retrying the logout.',
+      'Baileys: the session has no linked WhatsApp device (it never linked, its pairing code was never ' +
+      'entered, or the phone removed the link), so there is nothing to unlink. It was stopped locally and ' +
+      '`phone` is cleared; no success audit is written. Start it to link a device, or delete it, instead of ' +
+      'retrying the logout.',
   })
   @ApiResponse({
     status: 502,

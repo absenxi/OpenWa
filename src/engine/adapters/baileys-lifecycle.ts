@@ -1068,7 +1068,7 @@ export class BaileysLifecycle {
         // moved aside as unreadable, whose device may well still be linked.
         if (!(await this.keepsQuarantinedCredentials())) {
           throw new EngineNotReadyError(
-            'This session was never linked to WhatsApp, so there is nothing to unlink. It was stopped; start it to link a device, or delete it.',
+            'This session has no linked WhatsApp device, so there is nothing to unlink. It was stopped; start it to link a device, or delete it.',
           );
         }
         // The companion identity is required to address the unlink; without it nothing is sent.
@@ -1111,7 +1111,7 @@ export class BaileysLifecycle {
   /**
    * Whether the auth dir keeps credentials the auth store moved aside because creds.json could not be
    * parsed (`corrupt-*`, see useAtomicMultiFileAuthState). The device they belong to may still be linked.
-   * A dir that cannot be listed is answered yes: nothing then proves the session never linked.
+   * A dir that cannot be listed is answered yes: nothing then proves the session has no linked device.
    */
   private async keepsQuarantinedCredentials(): Promise<boolean> {
     try {
