@@ -1,3 +1,4 @@
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -33,7 +34,7 @@ const SWEEP_CHUNK_SIZE = 500;
 
 /** `metadata.media.data` holding a remote URL (a URL-based send) rather than base64 bytes. */
 const MEDIA_URL_POINTER = /^https?:\/\//i;
-/** Largest stored metadata the purge reads for an archived marker; a row with inline base64 is far above it. */
+/** Largest stored metadata the purge checks for an archived marker in bulk; a larger one is checked on its own. */
 const ARCHIVED_MARKER_MAX_METADATA_BYTES = 64 * 1024;
 
 /** The inline media shape carried on a persisted row's `metadata.media`. */
@@ -71,6 +72,8 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   private readonly orphanFirstSeenAt = new Map<string, number>();
   /** Last row id the retention purge walked past; the next run resumes after it. */
   private purgeCursor?: string;
+  /** Set on module destroy: the schedule stops, and a purge already running stops at its next check. */
+  private stopping = false;
 
   constructor(
     @InjectRepository(Message, 'data')
@@ -108,8 +111,14 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.stopping = true;
     for (const stop of this.stopMaintenance) stop();
     this.stopMaintenance = [];
+  }
+
+  /** The gateway is stopping or the data source has closed: a purge in flight keeps its remaining rows. */
+  private get closed(): boolean {
+    return this.stopping || this.repository.manager?.connection?.isInitialized === false;
   }
 
   /**
@@ -314,6 +323,7 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
         });
       }
       cleared += clearedIds.length;
+      if (this.closed) break;
 
       // A short batch means the backlog is drained and the next run starts over from the lowest id;
       // a run that hits the batch cap resumes where it stopped.
@@ -328,23 +338,47 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   /**
    * Under MESSAGE_INLINE_MEDIA=archive a row also points at its file through `metadata.media.archived`, which a
    * client reads as "the bytes are behind the media route". Drop it once the file is gone, through the same
-   * compare-and-set every metadata writer uses, so a reaction written meanwhile survives. Only a small metadata
-   * can carry the marker (an archive-only row holds no base64), and the size is checked first, so the inline
-   * copies of the default mode are never read. Returns the ids whose marker is still there.
+   * compare-and-set every metadata writer uses, so a reaction written meanwhile survives. An archive-only row holds
+   * no base64, but a long quoted text or many reactions can still take its metadata past the size checked in bulk,
+   * and nothing caps it: reactions accumulate per sender and a quoted body is whatever the sender sent. A row over
+   * that size is usually an inline copy of the default mode, which never carries the marker. The bulk statement
+   * reads only its size, through OCTET_LENGTH, which SQLite answers from the record header (testing the value
+   * itself there made SQLite load it whole). It is then looked up on its own in the database instead of being read
+   * and rewritten by the compare-and-set. That lookup scans the row's whole metadata, once per expired row, and
+   * better-sqlite3 answers it without a turn of the event loop, so the loop gets one before each lookup rather than
+   * being held for the batch. A shutdown that lands in one of those turns stops the loop and leaves the remaining
+   * rows for the next run. Returns the ids whose marker is still there.
    */
   private async dropArchivedMarkers(ids: string[]): Promise<Set<string>> {
-    const marked = await this.repository
+    const marker = '%"archived":true%';
+    const candidates = await this.repository
       .createQueryBuilder('m')
       .select('m.id', 'id')
+      .addSelect('OCTET_LENGTH(m.metadata)', 'bytes')
       .where('m.id IN (:...ids)', { ids })
-      .andWhere('CASE WHEN OCTET_LENGTH(m.metadata) <= :maxBytes THEN m.metadata LIKE :marker ELSE FALSE END', {
-        maxBytes: ARCHIVED_MARKER_MAX_METADATA_BYTES,
-        marker: '%"archived":true%',
-      })
-      .getRawMany<{ id: string }>();
+      .andWhere(
+        'CASE WHEN OCTET_LENGTH(m.metadata) <= :maxBytes THEN m.metadata LIKE :marker ' +
+          'ELSE OCTET_LENGTH(m.metadata) IS NOT NULL END',
+        { maxBytes: ARCHIVED_MARKER_MAX_METADATA_BYTES, marker },
+      )
+      .getRawMany<{ id: string; bytes: number | string }>();
     const kept = new Set<string>();
-    for (const { id } of marked) {
+    for (const [index, { id, bytes }] of candidates.entries()) {
+      const large = Number(bytes) > ARCHIVED_MARKER_MAX_METADATA_BYTES;
+      if (large) await yieldToEventLoop();
+      if (this.closed) {
+        for (const rest of candidates.slice(index)) kept.add(rest.id);
+        break;
+      }
       try {
+        if (large) {
+          const marked = await this.repository
+            .createQueryBuilder('m')
+            .where('m.id = :id', { id })
+            .andWhere('m.metadata LIKE :marker', { marker })
+            .getExists();
+          if (!marked) continue;
+        }
         await updateMessageMetadata(this.repository, { id }, metadata => {
           const media = metadata.media as Record<string, unknown> | undefined;
           if (!media || !('archived' in media)) return metadata;
