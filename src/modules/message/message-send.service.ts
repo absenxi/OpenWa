@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { markEngineSendFailure } from '../../common/errors/engine-send-failure';
+import { markNothingSent } from '../../common/errors/engine-not-sent.error';
 import { mergeSentMetadata, updateMessageMetadata } from './message-metadata';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, QueryDeepPartialEntity } from 'typeorm';
@@ -1037,11 +1038,12 @@ export class MessageSendService {
    * caller-supplied internal/unsafe URL returns a client error instead of a 500.
    * The raw guard message names the resolved internal IP (a recon/DNS-rebind oracle), so return a
    * generic message to the client and keep the detail in the server log only. Others pass through.
+   * The guard refuses before any fetch, so the replacement keeps the proof that nothing was sent.
    */
   private toClientFacingError(error: unknown): unknown {
     if (error instanceof SsrfBlockedError) {
       this.logger.warn(`Outbound media fetch blocked by SSRF guard: ${error.message}`);
-      return new BadRequestException(SSRF_BLOCKED_CLIENT_MESSAGE);
+      return markNothingSent(new BadRequestException(SSRF_BLOCKED_CLIENT_MESSAGE));
     }
     return error;
   }

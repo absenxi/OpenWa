@@ -42,7 +42,7 @@ import { MessageNotFoundError } from '../../common/errors/message-not-found.erro
 import { type createLogger } from '../../common/services/logger.service';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
-import { EngineNotSentError } from '../../common/errors/engine-not-sent.error';
+import { EngineNotSentError, markNothingSent } from '../../common/errors/engine-not-sent.error';
 import { parseWaId, userPart } from '../identity/wa-id';
 import { BAILEYS_QUERY_BUDGET_MS, confirmedWrite, withQueryDeadline } from './baileys-query-deadline';
 import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
@@ -162,7 +162,8 @@ export async function blockSvgDecoding(): Promise<void> {
  * Refuse a picture the image decoder cannot read, before Baileys hands it to that decoder: its own
  * conversion rejects such a file with an error nothing maps, which reached the client as a 500. An SVG is
  * one since blockSvgDecoding, and so is a file that is no image at all. Only the header is read. A sharp
- * that cannot load is left to the library, which reports that itself.
+ * that cannot load is left to the library, which reports that itself. The 400 is raised before anything
+ * reaches WhatsApp, so it carries markNothingSent.
  */
 export async function assertReadableImage(data: Buffer): Promise<void> {
   const sharp = await import('sharp').then(
@@ -173,8 +174,10 @@ export async function assertReadableImage(data: Buffer): Promise<void> {
   try {
     await sharp(data).metadata();
   } catch (error) {
-    throw new BadRequestException(
-      `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }
@@ -214,8 +217,10 @@ async function toPreviewJpeg(data: Buffer): Promise<Buffer> {
         .toBuffer(),
     );
   } catch (error) {
-    throw new BadRequestException(
-      `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }
