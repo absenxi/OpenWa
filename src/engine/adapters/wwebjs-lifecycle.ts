@@ -168,6 +168,11 @@ export const NAVIGATION_REINJECT_GRACE_MS = 60_000;
 // probe reports the truth again and the watchdog takes over.
 export const NAVIGATION_EPISODE_CAP_MS = 3 * NAVIGATION_REINJECT_GRACE_MS;
 
+// A 'ready' re-emitted sooner than this after a navigation can still come from a run that read the page before it (its
+// evaluate answered just ahead of the navigation), so it says nothing about the page now loaded. A real re-inject waits
+// for a page load and a WhatsApp Web boot first, which take longer than this even on a fast host.
+const PREVIOUS_PAGE_READY_MS = 5_000;
+
 // The single in-adapter retry of a navigation-killed first inject only runs while at least this much
 // of the lifecycle's outer init deadline remains — a retry the outer race SIGKILLs mid-launch would
 // surface as a bare 504 with no reason. Below it, fail with today's exact terminal shape instead.
@@ -270,12 +275,18 @@ export class WwebjsLifecycle {
   /** Counts the navigations stamped, so a probe can tell that one landed while it was waiting. */
   private navigationCount = 0;
   /**
-   * When the first navigation of a ready page that no probe has yet found re-injected happened, 0 when there is
-   * none. The library's re-emitted 'ready' closes the grace window but proves nothing about the page now
-   * loaded: it can come from a run that started in the previous document, and a re-inject that threw emits
-   * nothing at all. Only a probe that reads whatsapp-web.js's helpers in the current page clears it.
+   * When the navigation that began the current unverified episode of a ready page happened, 0 when there is none.
+   * The library's re-emitted 'ready' closes the grace window but proves nothing about the page now loaded: it can
+   * come from a run that started in the previous document, and a re-inject that threw emits nothing at all. Only a
+   * probe that reads whatsapp-web.js's helpers in the current page clears it. A 'ready' that came well after its own
+   * navigation does say that page re-injected, so the next navigation starts an episode of its own instead of
+   * inheriting this one's anchor; a page that never re-injects keeps the anchor of its first reload.
    */
   private reinjectUnverifiedSince = 0;
+  /** When the latest navigation was stamped. Unlike the grace window, a 'ready' does not clear it. */
+  private latestNavigationAt = 0;
+  /** When the live client last re-emitted 'ready'. */
+  private lastReadyAt = 0;
   /**
    * When the probe whose helpers read last answered no, or failed, started (Date.now()), 0 when none. Kept across the
    * navigations of an episode, so a page stuck reloading still counts its answers. A read is kept only if no
@@ -697,6 +708,7 @@ export class WwebjsLifecycle {
       // navigation window HERE, before the guards below: markReadyFromClientInfo early-returns while
       // already READY, so a clear behind it would never run for the re-inject case (#1081).
       this.clearNavigationReinjectWindow();
+      this.lastReadyAt = Date.now();
       // whatsapp-web.js can emit `ready` BEFORE its message listeners are attached: its post-auth
       // callback runs once per hasSynced trigger, and any run that finds `window.WWebJS` already
       // defined skips the attach and bare-emits `ready` — including while the first run's attach is
@@ -822,10 +834,13 @@ export class WwebjsLifecycle {
       if ((this.client as unknown as { lastLoggedOut?: boolean } | null)?.lastLoggedOut) return;
       this.navigationCount++;
       const now = Date.now();
+      // The page this navigation replaces re-emitted 'ready' well after its own navigation, so it re-injected.
+      const replacedPageReinjected = this.lastReadyAt - this.latestNavigationAt >= PREVIOUS_PAGE_READY_MS;
+      this.latestNavigationAt = now;
       if (this.navigationEpisodeStartedAt === 0) this.navigationEpisodeStartedAt = now;
       this.lastMainFrameNavigationAt = now;
       const ready = this.status === EngineStatus.READY || this.status === EngineStatus.ACTION_REQUIRED;
-      if (ready && this.reinjectUnverifiedSince === 0) this.reinjectUnverifiedSince = now;
+      if (ready && (this.reinjectUnverifiedSince === 0 || replacedPageReinjected)) this.reinjectUnverifiedSince = now;
       // `graced: false` here means the episode cap already expired — the stamp is recorded but the
       // probe/ensureReady grace is NOT being granted, so the log must not claim it is.
       this.host.logger.warn('Page navigated; whatsapp-web.js is re-injecting', {
@@ -1313,9 +1328,9 @@ export class WwebjsLifecycle {
 
   /**
    * A connected page whose reload no probe has found re-injected: still healing until the episode cap, then not
-   * alive. Measured from the first unverified navigation, so a reload that is merely slow (the sync after a
-   * reload can take minutes on a loaded host) keeps answering alive far past the grace window, and the watchdog
-   * recycles the session only once the helpers read kept answering no, or failing, for that long.
+   * alive. Measured from the navigation that began the unverified episode, so a reload that is merely slow (the sync
+   * after a reload can take minutes on a loaded host) keeps answering alive far past the grace window, and the
+   * watchdog recycles the session only once the helpers read kept answering no, or failing, for that long.
    */
   private reinjectStillHealing(): boolean {
     return this.reinjectUnverifiedSince === 0 || Date.now() - this.reinjectUnverifiedSince < NAVIGATION_EPISODE_CAP_MS;

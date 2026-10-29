@@ -9,8 +9,9 @@ import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
  * WhatsApp Web's socket answers CONNECTED again after a page reload whether or not whatsapp-web.js managed to
  * re-inject into the new page, and the library's re-emitted 'ready' can come from a run that started in the
  * previous document. So while a reload of a ready page is unverified the liveness probe also asks the page for
- * whatsapp-web.js's helpers. It never answers dead inside the reload grace, nor for a reload that is merely
- * slow: only once the helpers stayed missing past the episode cap.
+ * whatsapp-web.js's helpers. It never answers dead for a reload that is merely slow, inside its grace or after it:
+ * only once the helpers stayed missing past the episode cap, counted from the first reload since the page last
+ * re-injected.
  */
 describe('liveness of a ready page after a reload', () => {
   type Page = EventEmitter & { evaluate: jest.Mock };
@@ -315,6 +316,77 @@ describe('liveness of a ready page after a reload', () => {
     await expect(adapter.probeLiveness()).resolves.toBe(true);
     expect(client.pupPage.evaluate).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * A page that reloads at each of `reloads` (ms from now). A reload destroys whatsapp-web.js's helpers, and only that
+   * page's own re-inject, `reinjectAfter` ms later, brings them back and re-emits 'ready'. With `previousPageReady`, a
+   * 'ready' also arrives 1 s after each reload, from a run that read the page before it.
+   */
+  const reloadingPage = (
+    client: FakeClient,
+    reloads: number[],
+    reinjectAfter: number[],
+    { late = false, previousPageReady = false }: { late?: boolean; previousPageReady?: boolean } = {},
+  ): void => {
+    let page = 0;
+    let helpers = true;
+    client.getState.mockImplementation(() => delayed(WAState.CONNECTED, late ? 7_000 : 1_000));
+    client.pupPage.evaluate.mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve(helpers), late ? 5_000 : 1_000)),
+    );
+    reloads.forEach((at, i) => {
+      setTimeout(() => {
+        page = i + 1;
+        helpers = false;
+        reload(client);
+      }, at);
+      if (previousPageReady) setTimeout(() => client.emit('ready'), at + 1_000);
+      setTimeout(() => {
+        if (page === i + 1) helpers = true;
+        client.emit('ready');
+      }, at + reinjectAfter[i]);
+    });
+  };
+
+  // A slow re-inject (170 s, under the cap) is followed 5 s later by a second reload, before any probe saw the helpers.
+  // The second page re-injects 100 s after its own reload. Every page re-injected, so the second reload begins an
+  // episode of its own: inheriting the first one's anchor read it dead inside its own grace and recycled the session.
+  it.each([
+    ['in budget', false, false],
+    ['late', true, false],
+    ['in budget, with a ready from the previous page after each reload', false, true],
+    ['late, with a ready from the previous page after each reload', true, true],
+  ])(
+    'keeps a page alive whose second reload follows a slow re-inject (%s)',
+    async (_label, late, previousPageReady) => {
+      const { adapter, client } = wire();
+      reloadingPage(client, [0, 175_000], [170_000, 100_000], { late, previousPageReady });
+
+      const answers = await watchdogAnswers(adapter, 6, { firstProbeAt: 60_000 });
+
+      expect(answers).toEqual([true, true, true, true, true, true]);
+    },
+  );
+
+  // A 'ready' that comes moments after a reload is no sign that the reloaded page re-injected: a page that keeps
+  // reloading and never does is still recycled once its first reload is past the cap.
+  it.each([
+    ['in budget', false],
+    ['late', true],
+  ])(
+    'recycles a navigation loop that never re-injects although a ready follows each reload (%s)',
+    async (_label, late) => {
+      const { adapter, client } = wire();
+      client.getState.mockImplementation(() => delayed(WAState.CONNECTED, late ? 7_000 : 1_000));
+      client.pupPage.evaluate.mockImplementation(() => delayed(false, late ? 5_000 : 1_000));
+      client.pupPage.on('framenavigated', () => setTimeout(() => client.emit('ready'), 1_000));
+      reload(client);
+
+      const answers = await watchdogAnswers(adapter, 9, { loop: client });
+
+      expect(recycled(answers)).toBe(true);
+    },
+  );
 
   it('does not ask the page when no reload is pending', async () => {
     const { adapter, client } = wire();
