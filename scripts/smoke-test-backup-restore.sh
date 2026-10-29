@@ -3054,8 +3054,10 @@ if ! grep -q 'dump of schema openwa_s (POSTGRES_SCHEMA) present' <<<"$OUT_AV" ||
   fail "(av) restore did not print the schema load for a marked archive: $OUT_AV"
 fi
 # Dropping extensions that live in the schema takes their owner, and another OpenWA deployment's trigram index on
-# them refuses the load until that index is dropped: the printed text names both.
+# them refuses the load until that index is dropped: the printed text names both, and pgcrypto, which the dump
+# carries only when it lived in the schema.
 if ! grep -q 'when pg_trgm and unaccent live in that schema, owns them' <<<"$OUT_AV" ||
+  ! grep -q 'dump carries it, which it does only when pgcrypto lived in that schema' <<<"$OUT_AV" ||
   ! grep -q 'drop that index and load again' <<<"$OUT_AV"; then
   fail "(av) restore did not name the extensions' owner or the way past another deployment's trigram index: $OUT_AV"
 fi
