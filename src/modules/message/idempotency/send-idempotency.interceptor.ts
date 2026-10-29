@@ -28,10 +28,10 @@ const CLAIMABLE_SESSION_ID_MAX_LENGTH = 255;
  * Whether a failed send proves nothing reached WhatsApp, so the key can be freed for a retry.
  *
  * A 4xx or 501 before the engine call is a refusal. Errors escaping the shared engine-send failure
- * boundary stay uncertain unless the engine proves nothing was handed to WhatsApp (EngineNotSentError, or
- * media it could not fetch or read, see markNothingSent), or WhatsApp itself turned the request away with a
- * rate limit (EngineThrottledError): a socket can report 409 after WhatsApp accepted the message. Other server
- * errors/timeouts also keep the key taken.
+ * boundary stay uncertain unless the engine proves nothing was handed to WhatsApp (EngineNotSentError, media
+ * it could not fetch or read, or a socket replaced before the write; see markNothingSent), or WhatsApp itself
+ * turned the request away with a rate limit (EngineThrottledError): a socket can report 409 after WhatsApp
+ * accepted the message. Other server errors/timeouts also keep the key taken.
  */
 export function sendFailureProvesNothingSent(error: unknown): boolean {
   if (provesNothingSent(error) || error instanceof EngineThrottledError) return true;
