@@ -1043,7 +1043,9 @@ export class BaileysMessaging {
    * record is synchronous on the send's own continuation, ahead of the library's buffered echo.
    *
    * A send that fails after a stop or logout has torn its socket down is not ready (409), the same as
-   * one interrupted before it reached the socket; a failure on a socket still in place propagates.
+   * one interrupted before it reached the socket; a failure on a socket still in place propagates. A swap
+   * found before sock.sendMessage is called sent nothing, so that 409 carries markNothingSent. The send is
+   * not moved to the new socket: a logout followed by a relink to another account looks the same.
    *
    * `content` may be a function, for content that costs work to build (a link preview image): it is
    * called after the recipient check, and its own errors are not send refusals.
@@ -1060,16 +1062,16 @@ export class BaileysMessaging {
       try {
         numberId = await this.getNumberId(jid);
       } catch (error) {
-        if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+        if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
         throw new EngineNotSentError(`WhatsApp could not check the recipient before send: ${String(error)}`);
       }
-      if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+      if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
       if (!numberId) throw new BadRequestException(`WhatsApp reports recipient ${jid} is not registered`);
       const canonical = this.host.toEngineJid(numberId);
       if (canonical !== jid) jid = await this.toDeliverableJid(numberId);
     }
     const message = typeof content === 'function' ? await content() : content;
-    if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+    if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
     let sent: WAMessage | undefined;
     try {
       sent = options ? await sock.sendMessage(jid, message, options) : await sock.sendMessage(jid, message);

@@ -315,6 +315,25 @@ describe('a keyed send refused before anything reaches WhatsApp', () => {
     expect(await keyState()).toBe('absent');
   });
 
+  it('send-text whose socket reconnects during the preview image fetch frees the key; the retry sends', async () => {
+    const before = sock;
+    const after = { ...sock, sendMessage: jest.fn().mockResolvedValue({ key: { id: 'M2' }, messageTimestamp: 1 }) };
+    handler = (_req, res) => {
+      sock = after;
+      res.writeHead(200, { 'content-type': 'image/png' }).end(PNG_BYTES);
+    };
+    const body = previewBody({ thumbnailUrl: `${base}/a.png` });
+
+    const error = await failure('sendText', body);
+
+    expect((error as HttpException).getStatus()).toBe(409);
+    expect(before.sendMessage).not.toHaveBeenCalled();
+    expect(after.sendMessage).not.toHaveBeenCalled();
+    expect(await keyState()).toBe('absent');
+    servePng();
+    await expect(withKey('sendText', body)).resolves.toMatchObject({ messageId: 'M2' });
+  });
+
   it('send-image whose url answers 404 frees the key on Baileys; the retry sends once the url works', async () => {
     handler = (_req, res) => res.writeHead(404).end();
     const body = { chatId: '628123456789@c.us', url: `${base}/photo.png`, mimetype: 'image/png' };
