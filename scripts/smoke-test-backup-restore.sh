@@ -2912,7 +2912,16 @@ make_fixture "$AV/data/main.sqlite" "av-main"
 cat >"$AV/bin/pg_dump" <<EOF
 #!/bin/sh
 if [ "\$1" = --version ]; then
-  echo "pg_dump (PostgreSQL) \${AV_PG_DUMP_VERSION:-17.6 (Debian 17.6-1.pgdg13+1)}"
+  v="\${AV_PG_DUMP_VERSION:-17.6 (Debian 17.6-1.pgdg13+1)}"
+  # AV_PG_WRAPPER: Debian's pg_wrapper, which runs the local 13 cluster's client unless -h names a host, and the
+  # newest installed client, 17, when it does.
+  if [ -n "\${AV_PG_WRAPPER:-}" ]; then
+    v="13.23 (Debian 13.23-2.pgdg13+2)"
+    for a in "\$@"; do
+      if [ "\$a" = -h ]; then v="17.11 (Debian 17.11-1.pgdg13+1)"; fi
+    done
+  fi
+  echo "pg_dump (PostgreSQL) \$v"
   exit 0
 fi
 # The schema-only probe for pgcrypto prints AV_PGCRYPTO, a CREATE EXTENSION line, when it is set.
@@ -3019,6 +3028,18 @@ for AV_OLD in 13.23 9.6.24 unknown; do
     fail "(av) pg_dump $AV_OLD did not stop the scoped backup before the dump (rc $rc): $OUT_AV"
   fi
 done
+# The version is the one the dump runs with: read with the dump's arguments, as pg_wrapper picks the client by them.
+# A host argument gets the newer client, which the dump then uses; a DATABASE_URL leaves the cluster's 13, refused.
+rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_WRAPPER=1)"
+if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "$AV_SCOPED" ]; then
+  fail "(av) the client pg_wrapper runs for the dump's host was not the one checked (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+fi
+backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_WRAPPER=1 DATABASE_URL=postgres://app@db/shared >"$AV/rc"
+rc="$(cat "$AV/rc")"
+if [ "$rc" -eq 0 ] || [ -e "$AV/pg_dump-args" ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1 ||
+  ! grep -q 'needs pg_dump 14 or newer' <<<"$OUT_AV" || ! grep -q 'reports: pg_dump (PostgreSQL) 13.23' <<<"$OUT_AV"; then
+  fail "(av) the cluster's pg_dump 13 under a DATABASE_URL did not stop the scoped backup (rc $rc): $OUT_AV"
+fi
 rc="$(backup_av '' "$AV_PG" AV_PG_DUMP_VERSION=13.23)"
 if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-h|db|-p|5432|-U|app|shared|" ]; then
   fail "(av) pg_dump 13 did not keep the whole-database dump of public (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"

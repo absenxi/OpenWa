@@ -282,6 +282,17 @@ pg_dump_data() {
     pg_dump "$@"
     return
   fi
+  # The scoped dump names its extensions with -e, which pg_dump has had since 14: an older client stops at
+  # "unrecognized option" once the dump starts, so it is refused before anything is dumped. The version is read
+  # with the dump's own arguments, which pg_dump ignores after --version: Debian's pg_wrapper picks the client by
+  # them (the newest installed for -h, the local cluster's without). stdout is the dump, so messages go to stderr.
+  local version major_re='\) ([0-9]+)'
+  version="$(pg_dump --version "$@" 2>&1 || true)"
+  if ! [[ "$version" =~ $major_re ]] || [ "${BASH_REMATCH[1]}" -lt 14 ]; then
+    log "ERROR: POSTGRES_SCHEMA=$PG_DUMP_SCHEMA is dumped with pg_dump --extension, which needs pg_dump 14 or newer" >&2
+    log "       (the image ships 17); this one reports: $version" >&2
+    exit 1
+  fi
   local probe extensions=(-e plpgsql -e pg_trgm -e unaccent) pgcrypto=""
   probe="$(pg_dump --schema-only -n "$PG_DUMP_SCHEMA" -e plpgsql -e pgcrypto "$@")"
   if grep -Eqx "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA \"?$PG_DUMP_SCHEMA\"?;" <<<"$probe"; then
@@ -318,15 +329,6 @@ if [ "$DATABASE_TYPE" = "postgres" ]; then
       exit 1
     fi
     PG_DUMP_SCHEMA="$PG_SCHEMA"
-    # The scoped dump names its extensions with -e, which pg_dump has had since 14: an older client stops at
-    # "unrecognized option" once the dump starts, so it is refused before anything is dumped.
-    PG_DUMP_VERSION="$(pg_dump --version 2>&1 || true)"
-    PG_DUMP_MAJOR_RE='\) ([0-9]+)'
-    if ! [[ "$PG_DUMP_VERSION" =~ $PG_DUMP_MAJOR_RE ]] || [ "${BASH_REMATCH[1]}" -lt 14 ]; then
-      log "ERROR: POSTGRES_SCHEMA=$PG_SCHEMA is dumped with pg_dump --extension, which needs pg_dump 14 or newer"
-      log "       (the image ships 17); this one reports: $PG_DUMP_VERSION"
-      exit 1
-    fi
   fi
   # libpq defaults to sslmode=prefer, which falls back to plaintext and accepts any certificate, so
   # the dump sent the database password past the TLS check the app makes. Apply the app's check:
