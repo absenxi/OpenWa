@@ -6534,7 +6534,7 @@ Note: this DELETE returns `200` with a body (not the usual `204`).
 
 **Errors:** `400` cannot uninstall (e.g. built-in, or a package or storage folder that could not be removed; the emptied registry entry stays, so the call can be repeated) · `401` · `403` · `404` unknown id · `409` the plugin is still being restored after startup (retry shortly) · `500` the plugin registry could not be written; nothing was removed
 
-When only the final registry delete fails, the answer is `200` with a message that the emptied entry stayed; repeat the uninstall once the registry is writable.
+When only the final registry delete fails, the answer is `200` with a message that the emptied entry stayed and that names this call; repeat it once the registry is writable. The plugin is no longer listed by `GET /api/plugins`, so the dashboard has no card left to repeat it from. A `400` raised after the entry was emptied is still audited, as `plugin_uninstalled` with `partial: true` and the error. While the uninstall unloads the plugin, `PUT /api/plugins/:id/config`, `PUT /api/plugins/:id/config/:sessionId` and `PUT /api/plugins/:id/sessions` for it answer `409` and change nothing.
 
 ---
 
