@@ -1838,13 +1838,17 @@ A custom preview can carry an image, which WhatsApp renders as the large card ab
 `thumbnailBase64`, or `thumbnailUrl`, which is the only thing a custom preview fetches. As on the media
 routes, base64 wins when both are present. The URL goes through the same SSRF-guarded loader as a
 media URL (`SSRF_ALLOWED_HOSTS`, the session proxy, no redirects), and either form is capped at 5 MiB
-(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway re-encodes the image as a JPEG fitted inside
-1280x1280 (never enlarged, turned upright by its EXIF orientation, transparency made white) and uploads
-that to WhatsApp as the preview's high-quality thumbnail; Baileys is never handed the URL. A refused
-host or a failed fetch answers `400` (`503` when a fetch through the session's egress proxy fails before
-any response), an image over the cap `413`, and bytes that do not decode as an image (SVG, a truncated
-or corrupt file) `400`. Only a failed upload to WhatsApp sends the text with the preview but without
-the image, with a warning in the log.
+(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The image is read only after the recipient check, so a phone
+number WhatsApp reports as unregistered answers that `400` with nothing fetched or uploaded. The gateway
+re-encodes the image as a JPEG fitted inside 1280x1280 (never enlarged, turned upright by its EXIF
+orientation, transparency made white) and uploads that to WhatsApp as the preview's high-quality
+thumbnail; Baileys is never handed the URL. A refused host or a failed fetch answers `400` (`503` when a
+fetch through the session's egress proxy fails before any response), an image over the cap `413`, and
+bytes that do not decode as an image (SVG, a truncated or corrupt file) `400`; nothing was sent for any
+of them, so the `Idempotency-Key` is freed. The re-encode and the decode check need `sharp`: on a host
+where it cannot load, the image is uploaded as sent, and bytes that do not decode are not refused. Only
+a failed upload to WhatsApp sends the text with the preview but without the image, with a warning in
+the log.
 
 ```json
 {
@@ -1874,7 +1878,7 @@ the image, with a warning in the log.
 
 `messageId` is the WhatsApp message id from the engine. By default (`SIMULATE_TYPING`; set it to `false` to disable) a typing indicator and a humanising pause run before the send: 500 ms plus 45 ms per character, capped at `SIMULATE_TYPING_MAX_MS` (default 5000 ms), with +/-15% jitter; the pause never exceeds that cap, jitter included.
 
-**Errors:** `400` unknown body field, validation failure, session not active / blocked by a plugin hook, or a `customLinkPreview` image that is SSRF-blocked, cannot be fetched or does not decode (see **Link previews**) · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `413` the `customLinkPreview` image over 5 MiB, or over `MEDIA_DOWNLOAD_MAX_BYTES` if that is lower · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` a `customLinkPreview.thumbnailUrl` fetch through the session's egress proxy failed before any response, the proxy or the target at fault (nothing was sent, retryable); on Baileys, also when the recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
+**Errors:** `400` unknown body field, validation failure, session not active / blocked by a plugin hook, or a `customLinkPreview` image that is SSRF-blocked, cannot be fetched or does not decode (see **Link previews**; nothing was sent, the `Idempotency-Key` is freed); on Baileys, also a phone number WhatsApp reports as unregistered · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `413` the `customLinkPreview` image over 5 MiB, or over `MEDIA_DOWNLOAD_MAX_BYTES` if that is lower (nothing was sent, the `Idempotency-Key` is freed) · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` a `customLinkPreview.thumbnailUrl` fetch through the session's egress proxy failed before any response, the proxy or the target at fault (nothing was sent, retryable); on Baileys, also when the recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
 
 ##### Quoted sends
 
