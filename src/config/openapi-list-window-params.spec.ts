@@ -18,8 +18,8 @@ const snapshot = (): OpenAPIObject =>
   JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'openapi.json'), 'utf8')) as OpenAPIObject;
 
 describe('openapi.json list-window query parameters', () => {
-  it('publishes every limit and offset query parameter as a number', () => {
-    const notNumeric: string[] = [];
+  it('publishes every limit and offset query parameter as an integer', () => {
+    const notInteger: string[] = [];
     let seen = 0;
 
     for (const [route, item] of Object.entries(snapshot().paths)) {
@@ -28,8 +28,8 @@ describe('openapi.json list-window query parameters', () => {
         for (const p of (operation as { parameters?: QueryParameter[] }).parameters ?? []) {
           if (p.in !== 'query' || (p.name !== 'limit' && p.name !== 'offset')) continue;
           seen++;
-          if (p.schema?.type !== 'integer' && p.schema?.type !== 'number') {
-            notNumeric.push(`${method.toUpperCase()} ${route} ${p.name}: ${p.schema?.type}`);
+          if (p.schema?.type !== 'integer') {
+            notInteger.push(`${method.toUpperCase()} ${route} ${p.name}: ${p.schema?.type}`);
           }
         }
       }
@@ -37,6 +37,6 @@ describe('openapi.json list-window query parameters', () => {
 
     // Vacuity guard: a parse that found no parameter would pass the comparison below.
     expect(seen).toBeGreaterThanOrEqual(20);
-    expect(notNumeric).toEqual([]);
+    expect(notInteger).toEqual([]);
   });
 });

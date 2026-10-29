@@ -26,7 +26,7 @@
             "required": false,
             "in": "query",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           },
           {
@@ -34,7 +34,7 @@
             "required": false,
             "in": "query",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           },
           {
@@ -1497,7 +1497,7 @@
             }
           },
           "409": {
-            "description": "Baileys: the session never linked to WhatsApp, so there is nothing to unlink. It was stopped locally and `phone` is cleared; no success audit is written. Start it to link a device, or delete it, instead of retrying the logout.",
+            "description": "Baileys: the session has no linked WhatsApp device (it never linked, its pairing code was never entered, or the phone removed the link), so there is nothing to unlink. It was stopped locally and `phone` is cleared; no success audit is written. Start it to link a device, or delete it, instead of retrying the logout.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4279,7 +4279,7 @@
             "in": "query",
             "description": "Max messages to return (default 50)",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           },
           {
@@ -4288,7 +4288,7 @@
             "in": "query",
             "description": "Offset for pagination",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           },
           {
@@ -6528,7 +6528,7 @@
             "in": "query",
             "description": "Max messages to return (default 50)",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           },
           {
@@ -13834,7 +13834,7 @@
             "in": "query",
             "description": "Max messages to return (default 50, max 100)",
             "schema": {
-              "type": "number"
+              "type": "integer"
             }
           }
         ],
@@ -16678,6 +16678,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The plugin is being uninstalled; nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "summary": "Update plugin configuration",
@@ -16828,6 +16838,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The plugin is being uninstalled; nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "summary": "Set a plugin config override for a specific session (empty = clear it)",
@@ -16902,6 +16922,16 @@
           },
           "404": {
             "description": "Plugin not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The plugin is being uninstalled; nothing was changed",
             "content": {
               "application/json": {
                 "schema": {
