@@ -148,7 +148,8 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
    * can evict the entry inside that same window, leaving it indistinguishable from never-learned.
    * Counted per lid, so the first of two overlapping writes settling does not clear the second. The
    * latest actual report's token remains until all older writes settle, isolating their late results.
-   * It also holds the second-lid check the latest new pairing in flight owes, for a report overlapping it.
+   * It also holds the second-lid check the latest new pairing owes until a landed write queues it, for a report
+   * overlapping it.
    */
   private readonly unsettledWrites = new Map<
     string,
@@ -178,8 +179,8 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
   private readonly writeWarning = { at: -Infinity, held: 0 };
   /**
    * Second-lid checks owed after the writes of the report that owed one failed, or its read did, until a write of
-   * that phone lands. A new check stays on its lid's {@link unsettledWrites} entry while its write is in flight.
-   * Kept apart from the mapping cache and its eviction.
+   * that phone lands. A new check stays on its lid's {@link unsettledWrites} entry until a landed write queues it or
+   * every write of the lid has settled. Kept apart from the mapping cache and its eviction.
    */
   private readonly secondLidOwed = new Map<string, SecondLidCheck>();
   private readonly secondLidDropWarning = { at: -Infinity, held: 0 };
@@ -456,7 +457,7 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     const report = { phone };
     const writing = this.beginWrite(lid, report, true);
     if (gaining) {
-      writing.check = owed; // while in flight; the cap counts only checks no write holds
+      writing.check = owed; // outside the cap of owed checks while the lid's writes are unsettled
       this.secondLidOwed.delete(lid);
     }
     try {
@@ -514,12 +515,7 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       );
       return false;
     } finally {
-      // Owed until a write of its phone lands, unless a newer report of the lid took its place. A negative
-      // overlapping the write can settle first; that write still queues the check if it lands.
-      if (owed && writing.check === owed) {
-        writing.check = undefined;
-        if (!owed.queued) this.oweSecondLid(lid, owed);
-      }
+      if (owed?.queued && writing.check === owed) writing.check = undefined; // a landed write queued it
       this.endWrite(lid, writing);
     }
   }
@@ -535,8 +531,16 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     return writing;
   }
 
-  private endWrite(lid: string, writing: { count: number }): void {
-    if (this.unsettledWrites.get(lid) === writing && --writing.count === 0) this.unsettledWrites.delete(lid);
+  /**
+   * Once the last write of the lid settles, the latest new pairing's check, if no landed write queued it, is owed
+   * until a write of its phone lands, unless a newer report of the lid took its place. Not before: an overlapping
+   * report or negative can fail while the pairing's own write is still in flight, and that write queues the check if
+   * it lands.
+   */
+  private endWrite(lid: string, writing: { count: number; check?: SecondLidCheck }): void {
+    if (this.unsettledWrites.get(lid) !== writing || --writing.count > 0) return;
+    this.unsettledWrites.delete(lid);
+    if (writing.check && !writing.check.queued) this.oweSecondLid(lid, writing.check);
   }
 
   /**
@@ -597,7 +601,10 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     this.secondLidListener = listener;
   }
 
-  /** Keep a check owed, dropping the oldest past {@link SECOND_LID_OWED_MAX}: a dropped check is not run. */
+  /**
+   * Keep a check owed, dropping the oldest past {@link SECOND_LID_OWED_MAX}: a dropped check runs only if a report
+   * in flight already carries it.
+   */
   private oweSecondLid(lid: string, check: SecondLidCheck): void {
     if (setNewest(this.secondLidOwed, lid, check, SECOND_LID_OWED_MAX)) {
       const message = `More than ${SECOND_LID_OWED_MAX} second-lid checks are owed; dropping the oldest`;

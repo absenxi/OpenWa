@@ -2516,6 +2516,13 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
   }
 
   const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+  /** Wait for a condition, up to a deadline; the expectations after it then show what is missing. */
+  const until = async (done: () => boolean, ms = 2000): Promise<void> => {
+    for (const end = Date.now() + ms; !done() && Date.now() < end;)
+      await new Promise(resolve => setTimeout(resolve, 2));
+  };
+  const owedChecks = (store: LidMappingStoreService) =>
+    (store as unknown as { secondLidOwed: Map<string, { phone: string }> }).secondLidOwed;
   const phoneReads = (repo: ReturnType<typeof makeFakeRepo>) =>
     repo.find.mock.calls.filter(([options]) => (options as { where?: { phone?: unknown } })?.where?.phone).length;
 
@@ -2862,6 +2869,37 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
 
     expect(reports).toEqual([expect.objectContaining({ phone: '628999', previousLid: '111', newLid: '222' })]);
     expect(capLines(warn)).toEqual([]);
+  });
+
+  // The same sync reports every lid twice, and the second statement fails (SQLITE_BUSY) before the first lands.
+  it('owes no check and logs no drop while the first write of each lid of such a sync is in flight', async () => {
+    const saved = process.env.LID_MAPPING_CACHE_MAX;
+    process.env.LID_MAPPING_CACHE_MAX = '0'; // every lid stays cached, so the second report is not new
+    try {
+      const { repo, store, reports, warn } = await watched([{ lid: '111', phone: '628999' }]);
+      const upsert = repo.upsert.getMockImplementation() as (values: Partial<LidMapping>) => Promise<object>;
+      const land: Array<() => void> = [];
+      repo.upsert.mockImplementation(
+        (values: Partial<LidMapping>) => new Promise(resolve => land.push(() => resolve(upsert(values)))),
+      );
+      const lids = ['222', ...Array.from({ length: 10_001 }, (_, i) => `5${i}`)];
+      const phoneOf = (lid: string) => (lid === '222' ? '628999' : `62700${lid}`);
+      const firsts = lids.map(lid => store.remember(lid, phoneOf(lid), 's2'));
+      repo.upsert.mockRejectedValue(new Error('SQLITE_BUSY'));
+      await Promise.all(lids.map(lid => store.remember(lid, phoneOf(lid), 's2')));
+      const owedInFlight = owedChecks(store).size;
+      land.forEach(write => write());
+      await Promise.all(firsts);
+      await until(() => reports.length > 0);
+
+      expect(owedInFlight).toBe(0);
+      expect(reports).toEqual([expect.objectContaining({ phone: '628999', previousLid: '111', newLid: '222' })]);
+      expect(capLines(warn)).toEqual([]);
+      expect(owedChecks(store).size).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.LID_MAPPING_CACHE_MAX;
+      else process.env.LID_MAPPING_CACHE_MAX = saved;
+    }
   });
 
   it('keeps at most its cap of owed checks and logs a drop at most once a minute, with a count', async () => {
