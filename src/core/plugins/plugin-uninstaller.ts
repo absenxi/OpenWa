@@ -16,6 +16,17 @@ export class PluginUninstallingError extends Error {
 }
 
 /**
+ * An uninstall that failed after it stored the plugin's registry entry emptied of config, session activation and the
+ * enable decision: unlike a refusal, it changed the plugin. The message is the failure's own.
+ */
+export class PluginUninstallIncompleteError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'PluginUninstallIncompleteError';
+  }
+}
+
+/**
  * Refuse an operator-settings write to a plugin an uninstall is unloading: it would be stored over the entry the
  * uninstall has just emptied, and outlive the uninstall in an entry the final delete fails to drop.
  */
@@ -72,7 +83,8 @@ export class PluginUninstaller {
    * Fully remove an installed user plugin: disable + unload from the runtime, delete its directory from
    * disk, then drop its persisted registry entry (last, so a failed removal can be repeated). Built-ins (engines, bundled extensions) are
    * registered programmatically with no on-disk dir and must never be removable. `registryEntryKept` is true when
-   * everything else was removed but registry.json could not be written, leaving the emptied entry.
+   * everything else was removed but registry.json could not be written, leaving the emptied entry. A failure after
+   * the emptied entry was stored rejects with {@link PluginUninstallIncompleteError}, carrying the failure's message.
    */
   async uninstallPlugin(pluginId: string): Promise<{ registryEntryKept: boolean }> {
     if (this.pluginStorage.getPluginEntry(pluginId)?.builtIn) {
@@ -84,6 +96,15 @@ export class PluginUninstaller {
     // removal that stops part-way leaves a package that boots disabled and unconfigured.
     this.pluginStorage.clearOperatorSettings(pluginId, { mustPersist: true });
 
+    try {
+      return await this.removeEmptied(pluginId);
+    } catch (error) {
+      throw new PluginUninstallIncompleteError(error);
+    }
+  }
+
+  /** The removal after the entry is stored emptied: from here on a failure has already erased the settings. */
+  private async removeEmptied(pluginId: string): Promise<{ registryEntryKept: boolean }> {
     // Read the package location BEFORE unloading: unloadPlugin drops the runtime record that holds
     // it, and for a plugin loaded from the legacy directory the configured root is the wrong tree —
     // deleting there removes the ctx.storage directory and leaves the code, so the plugin comes

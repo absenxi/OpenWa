@@ -747,7 +747,12 @@ export class PluginsService {
     } catch (error) {
       // Raised only by the write that empties the entry, before anything is removed, so nothing was applied.
       if (error instanceof PluginRegistryWriteError) throw new InternalServerErrorException(error.message);
-      throw new BadRequestException(error instanceof Error ? error.message : String(error));
+      // The cause tells the controller whether the failure came after the entry was emptied (it audits that one).
+      // With options, Nest drops the body's `error` field unless the description is passed too.
+      throw new BadRequestException(error instanceof Error ? error.message : String(error), {
+        cause: error,
+        description: 'Bad Request',
+      });
     }
   }
 

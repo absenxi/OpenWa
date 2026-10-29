@@ -9,6 +9,7 @@ import {
   Header,
   HttpCode,
   HttpStatus,
+  HttpException,
   UseInterceptors,
   UploadedFile,
 } from '@nestjs/common';
@@ -29,6 +30,7 @@ import { RequireRole, RequireUnscopedKey } from '../auth/decorators/auth.decorat
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
+import { PluginUninstallIncompleteError } from '../../core/plugins/plugin-uninstaller';
 
 /** Max accepted upload size for a plugin package (compressed). */
 const MAX_PLUGIN_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -285,7 +287,14 @@ export class PluginsController {
   @ApiResponse({ status: 409, description: RESTORING_CONFLICT })
   @ApiResponse({ status: 500, description: 'The plugin registry could not be written; nothing was removed' })
   async uninstall(@Param('id') id: string): Promise<{ success: boolean; message: string }> {
-    const result = await this.pluginsService.uninstall(id);
+    const result = await this.pluginsService.uninstall(id).catch((error: unknown) => {
+      // A 400 raised after the entry was stored emptied has already erased the plugin's config and stopped it;
+      // a refusal (built-in, unwritable registry) changed nothing and leaves no row.
+      if (error instanceof HttpException && error.cause instanceof PluginUninstallIncompleteError) {
+        this.record(AuditAction.PLUGIN_UNINSTALLED, id, { partial: true, error: error.message });
+      }
+      throw error;
+    });
     this.record(AuditAction.PLUGIN_UNINSTALLED, id);
     return result;
   }
