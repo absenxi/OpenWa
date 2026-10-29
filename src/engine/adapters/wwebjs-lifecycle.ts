@@ -573,6 +573,9 @@ export class WwebjsLifecycle {
     if (typeof inject !== 'function') return;
     target.inject = () =>
       inject.call(client).catch((error: unknown) => {
+        // A teardown or an unlink navigates the page too, and the library re-injects into it while it closes or is
+        // replaced: that failure is the teardown at work, not a reloaded page heading for a recycle.
+        if (this.tearingDown || this.disconnectReported || this.client !== client) return;
         this.host.logger.warn('whatsapp-web.js could not re-inject into the reloaded WhatsApp Web page', {
           sessionId: this.host.config.sessionId,
           error: error instanceof Error ? error.message : String(error),

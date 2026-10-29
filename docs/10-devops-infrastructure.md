@@ -1029,7 +1029,9 @@ Two rows need care when aggregating. `openwa_queue_jobs` is read from the shared
 reports the same cluster-wide value: aggregate it with `max`, not `sum`. The event-loop delay window
 runs from the previous uncached render (renders are cached for 5 s), so with several scrapers it is
 shared between them. `openwa_unhandled_rejections_total{kind="page_context_lost"}` counts the expected
-whatsapp-web.js navigation rejections; alert on `kind="other"`.
+Puppeteer rejections a page navigation or an engine teardown leaves without an owner; alert on
+`kind="other"`. A whatsapp-web.js session reports a failed re-inject into its reloaded page itself, as a
+`page_reinject_failed` warning naming the session, so that one is not counted here.
 
 `src/common/docs-metrics-list.spec.ts` compares this table against the metric names declared in
 `metrics.service.ts` and `request-metrics.ts`, and checks that every helper `render()` splices in is

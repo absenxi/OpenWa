@@ -440,4 +440,73 @@ describe('a re-inject that throws in a reloaded page', () => {
       expect.objectContaining({ sessionId: 'sess-reinject', action: 'page_reinject_failed', error: 'ready timeout' }),
     );
   });
+
+  type WrappedClient = Client & { inject: () => Promise<void> };
+
+  // The library re-injects on every navigation, also on the ones a teardown brings: the in-page unlink of our own
+  // logout navigates while the logout is still awaited, and an unlink WhatsApp reports navigates to the QR page. A
+  // re-inject that dies then is that teardown at work, not a reloaded page heading for a recycle.
+  it.each<[string, (adapter: WhatsAppWebJsAdapter, client: WrappedClient) => Promise<void>]>([
+    [
+      'our own logout',
+      async adapter => {
+        const logout = jest
+          .spyOn(Client.prototype as unknown as { logout: () => Promise<void> }, 'logout')
+          .mockImplementation(function (this: WrappedClient) {
+            return this.inject();
+          });
+        try {
+          await adapter.logout();
+        } finally {
+          logout.mockRestore();
+        }
+      },
+    ],
+    [
+      'a stop that already let go of the client',
+      async (adapter, client) => {
+        const destroy = jest
+          .spyOn(Client.prototype as unknown as { destroy: () => Promise<void> }, 'destroy')
+          .mockResolvedValue(undefined);
+        try {
+          await adapter.disconnect();
+        } finally {
+          destroy.mockRestore();
+        }
+        await client.inject();
+      },
+    ],
+    [
+      'an unlink WhatsApp reported',
+      async (_adapter, client) => {
+        client.emit('disconnected', 'LOGOUT');
+        await client.inject();
+      },
+    ],
+    [
+      // The stuck-auth recovery drops the client with no teardown flag set, before the session reports anything.
+      'a recovery that let go of the client',
+      async (adapter, client) => {
+        (adapter as unknown as { client: unknown }).client = null;
+        await client.inject();
+      },
+    ],
+  ])('is not logged when it dies under %s', async (_label, teardown) => {
+    const adapter = new WhatsAppWebJsAdapter({
+      sessionId: 'sess-reinject',
+      sessionDataPath: './data/sessions',
+      puppeteer: {},
+    });
+    const warn = jest.spyOn((adapter as unknown as { logger: { warn: () => void } }).logger, 'warn');
+    await adapter.initialize({});
+    const client = (adapter as unknown as { client: WrappedClient }).client;
+
+    await teardown(adapter, client);
+
+    expect(injectSpy).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'page_reinject_failed' }),
+    );
+  });
 });
