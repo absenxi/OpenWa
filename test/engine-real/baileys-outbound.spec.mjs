@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as lib from '@whiskeysockets/baileys';
 import { LIDMappingStore } from '@whiskeysockets/baileys/lib/Signal/lid-mapping.js';
 
@@ -8,6 +11,8 @@ const require = createRequire(import.meta.url);
 const { BaileysMessaging } = require('../../dist/engine/adapters/baileys-messaging.js');
 const { BaileysSessionStore } = require('../../dist/engine/adapters/baileys-session-store.js');
 const { EngineNotSentError } = require('../../dist/common/errors/engine-not-sent.error.js');
+const { EngineNotReadyError } = require('../../dist/common/errors/engine-not-ready.error.js');
+const { BaileysLifecycle } = require('../../dist/engine/adapters/baileys-lifecycle.js');
 const PN = '6281111111111@s.whatsapp.net';
 const LID = '123456789012345@lid';
 const noop = () => undefined;
@@ -223,4 +228,87 @@ test('a failed LID query still uses a canonical phone destination', async t => {
   sock.signalRepository.lidMapping.getLIDForPN.mock.mockImplementation(() => Promise.reject(new Error('no mapping')));
   await messaging.sendTextMessage(PN.replace('@s.whatsapp.net', '@c.us'), 'hello');
   assert.equal(sock.sendMessage.mock.calls[0].arguments[0], PN);
+});
+
+// A real socket, built against a closed local port so nothing reaches WhatsApp, logged out through the compiled
+// lifecycle. query() is replaced to record the unlink it would send.
+function loggedOutSocket(t) {
+  const silent = {
+    level: 'silent',
+    child: () => silent,
+    trace: noop,
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: noop,
+  };
+  const creds = lib.initAuthCreds();
+  const sock = lib.default({
+    auth: { creds, keys: { get: () => Promise.resolve({}), set: () => Promise.resolve() } },
+    logger: silent,
+    waWebSocketUrl: 'ws://127.0.0.1:1',
+    connectTimeoutMs: 1000,
+  });
+  sock.ev.on('connection.update', noop);
+  const sent = [];
+  sock.query = node => {
+    sent.push(node);
+    return Promise.resolve({ tag: 'iq', attrs: { type: 'result' } });
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openwa-engine-real-logout-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const authPath = path.join(dir, 's1');
+  fs.mkdirSync(authPath);
+  fs.writeFileSync(path.join(authPath, 'creds.json'), '{}');
+  const lifecycle = new BaileysLifecycle({
+    authPath,
+    logger: { log: noop, warn: noop, error: noop, debug: noop },
+    config: { sessionId: 's1', dbSessionId: 's1' },
+    liveCalls: new Map(),
+    fenceStoredWrites: noop,
+    getOnStateChanged: noop,
+    getOnDisconnected: noop,
+    getOnError: noop,
+    getOnCredentialTeardownStarted: noop,
+  });
+  lifecycle.lib = lib;
+  lifecycle.sock = sock;
+  const logout = () =>
+    lifecycle.logout().then(
+      () => 'unlinked',
+      error => error,
+    );
+  return { sock, creds, sent, logout, authPath };
+}
+
+test('a logout of a socket that never linked refuses with the 409 and sends nothing', async t => {
+  const { sent, logout } = loggedOutSocket(t);
+  assert.ok((await logout()) instanceof EngineNotReadyError);
+  assert.equal(sent.length, 0);
+});
+
+test('a logout while a pairing code is pending refuses with the 409 and sends nothing', async t => {
+  const { sock, creds, sent, logout } = loggedOutSocket(t);
+  await sock.requestPairingCode('6281234567890').catch(noop);
+  // The request names the number in the credentials; the socket's user is the copy made when it was built.
+  assert.equal(creds.me?.id, '6281234567890@s.whatsapp.net');
+  assert.equal(sock.user, undefined);
+  assert.ok((await logout()) instanceof EngineNotReadyError);
+  assert.equal(sent.length, 0);
+});
+
+test('a logout right after pairing, before the restart, unlinks the device', async t => {
+  const { sock, sent, logout, authPath } = loggedOutSocket(t);
+  // What pair-success hands to creds.update; the library merges it into the socket's credentials.
+  sock.ev.emit('creds.update', {
+    me: { id: '6281234567890:12@s.whatsapp.net', name: 'Biz', lid: '123456789012345:12@lid' },
+    account: lib.proto.ADVSignedDeviceIdentity.fromObject({ details: Buffer.from([1]) }),
+    platform: 'android',
+  });
+  assert.equal(sock.user, undefined);
+  assert.equal(await logout(), 'unlinked');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].content[0].tag, 'remove-companion-device');
+  assert.equal(sent[0].content[0].attrs.jid, '6281234567890:12@s.whatsapp.net');
+  assert.equal(fs.existsSync(authPath), false);
 });
