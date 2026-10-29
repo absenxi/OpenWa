@@ -9,6 +9,7 @@ import { PluginSandboxBridge } from './plugin-sandbox-bridge';
 import { PluginWorkerHost } from './sandbox/plugin-worker-host';
 import { unregisterPluginSearchProvider } from './search-provider-registration.util';
 import { resolvePluginMainPath } from './plugin-paths';
+import { assertNotUninstalling } from './plugin-uninstaller';
 
 /**
  * The runtime half of the plugin loader: everything that happens to a plugin AFTER the boot scan has
@@ -219,6 +220,7 @@ export class PluginLifecycle {
     if (!plugin) {
       throw new Error(`Plugin ${pluginId} not found`);
     }
+    assertNotUninstalling(pluginId, plugin);
 
     // Persist only the operator's keys on top of what was persisted before, not the effective merge:
     // a built-in's effective config carries its env-derived defaults, and storing those would freeze
@@ -263,6 +265,7 @@ export class PluginLifecycle {
     if (!plugin) {
       throw new Error(`Plugin ${pluginId} not found`);
     }
+    assertNotUninstalling(pluginId, plugin);
     if (plugin.manifest.sessionScoped === false) {
       throw new Error(`Plugin ${pluginId} is global (not session-scoped) and cannot be activated per session`);
     }
@@ -295,6 +298,7 @@ export class PluginLifecycle {
     if (!plugin) {
       throw new Error(`Plugin ${pluginId} not found`);
     }
+    assertNotUninstalling(pluginId, plugin);
     if (plugin.manifest.sessionScoped === false) {
       throw new Error(`Plugin ${pluginId} is global (not session-scoped) and has no per-session config`);
     }

@@ -4,6 +4,25 @@ import { createLogger } from '../../common/services/logger.service';
 import { PluginInstance } from './plugin.interfaces';
 import { PluginRegistryWriteError, PluginStorageService } from './plugin-storage.service';
 
+/** Loaded plugins an uninstall is unloading, by runtime record (one per loader, so specs never share a mark). */
+const uninstalling = new WeakSet<PluginInstance>();
+
+/** A config or session-activation write refused because an uninstall is removing the plugin. */
+export class PluginUninstallingError extends Error {
+  constructor(pluginId: string) {
+    super(`Plugin ${pluginId} is being uninstalled; the change was not applied`);
+    this.name = 'PluginUninstallingError';
+  }
+}
+
+/**
+ * Refuse an operator-settings write to a plugin an uninstall is unloading: it would be stored over the entry the
+ * uninstall has just emptied, and outlive the uninstall in an entry the final delete fails to drop.
+ */
+export function assertNotUninstalling(pluginId: string, plugin: PluginInstance): void {
+  if (uninstalling.has(plugin)) throw new PluginUninstallingError(pluginId);
+}
+
 /**
  * The uninstall half of the plugin loader: fully remove an installed user plugin — disable + unload
  * from the runtime, delete its directories from disk, then drop its persisted registry entry. Install,
@@ -72,8 +91,16 @@ export class PluginUninstaller {
     const recordedDir = this.plugins.get(pluginId)?.packageDir ?? this.unloadedDirs.get(pluginId) ?? null;
     if (recordedDir) this.unloadedDirs.set(pluginId, recordedDir);
 
-    if (this.plugins.has(pluginId)) {
-      await this.unload(pluginId);
+    // The unload awaits the plugin's own hooks with the record still loaded: no config or session write may land
+    // over the emptied entry meanwhile. Once the record is gone every such write is refused as not found.
+    const loaded = this.plugins.get(pluginId);
+    if (loaded) {
+      uninstalling.add(loaded);
+      try {
+        await this.unload(pluginId);
+      } finally {
+        uninstalling.delete(loaded);
+      }
     }
 
     // A takeover the plugin held keeps every other plugin silent on that chat, and nothing is left to

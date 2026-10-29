@@ -4,11 +4,12 @@ import * as path from 'path';
 import AdmZip from 'adm-zip';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
-import { InternalServerErrorException } from '@nestjs/common';
+import { ConflictException, InternalServerErrorException } from '@nestjs/common';
 import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
 import { PluginStorageService } from '../../core/plugins/plugin-storage.service';
 import { HookManager } from '../../core/hooks';
 import { PluginRegistryEntry } from '../../core/plugins/plugin.interfaces';
+import { PluginUninstallingError } from '../../core/plugins/plugin-uninstaller';
 import type { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { PluginsController } from './plugins.controller';
@@ -143,6 +144,65 @@ describe('Uninstall when registry.json cannot be written', () => {
 
     expect(operatorSettings(restarted.storage.getPluginEntry('p1'))).toEqual(emptied);
     expect(operatorSettings(onDisk())).toEqual(emptied);
+  });
+
+  it('refuses config and session writes that arrive while the uninstall is unloading the plugin', async () => {
+    onRelease = () => fs.chmodSync(registryRoot, 0o500);
+    // The unload awaits the plugin's own hooks with the plugin still loaded; every write lands in that window.
+    const lifecycle = (gateway.loader as unknown as { lifecycle: { unloadPlugin(id: string): Promise<void> } })
+      .lifecycle;
+    const unload = lifecycle.unloadPlugin.bind(lifecycle);
+    const outcomes: unknown[] = [];
+    const attempt = (write: () => unknown): void => {
+      try {
+        outcomes.push(write());
+      } catch (error) {
+        outcomes.push(error);
+      }
+    };
+    jest.spyOn(lifecycle, 'unloadPlugin').mockImplementation(async (id: string) => {
+      const { controller, loader } = gateway;
+      attempt(() => controller.updateConfig('p1', { config: { token: 'saved-during-uninstall' } }));
+      attempt(() => controller.updateSessionConfig('p1', 's2', { config: { token: 'tenant-2' } }));
+      attempt(() => controller.updateSessions('p1', { sessions: ['s2'] }));
+      // The integration fabric projects instance config through the loader directly, best effort.
+      attempt(() => loader.updatePluginConfig('p1', { token: 'instance-secret' }));
+      attempt(() => loader.setPluginSessionConfig('p1', 's3', { token: 'instance-3' }));
+      attempt(() => loader.setPluginSessions('p1', ['*']));
+      return unload(id);
+    });
+
+    const result = await gateway.controller.uninstall('p1');
+
+    expect(outcomes.slice(0, 3).map(o => o instanceof ConflictException)).toEqual([true, true, true]);
+    expect(outcomes.slice(3).map(o => o instanceof PluginUninstallingError)).toEqual([true, true, true]);
+    expect(result.message).toMatch(/keeps its entry, emptied of config, sessions and the enable decision/);
+    // Only the uninstall is audited: no refused write left a row.
+    expect(gateway.logInfo).toHaveBeenCalledTimes(1);
+    expect(gateway.logInfo).toHaveBeenCalledWith(AuditAction.PLUGIN_UNINSTALLED, expect.anything());
+    expect(operatorSettings(gateway.storage.getPluginEntry('p1'))).toEqual(emptied);
+    expect(operatorSettings(onDisk())).toEqual(emptied);
+
+    // What a reinstall of the id inherits after a restart.
+    onRelease = () => undefined;
+    fs.chmodSync(registryRoot, 0o700);
+    const restarted = boot();
+    restarted.loader.onModuleInit();
+    restarted.service.install({ buffer: pkg() });
+    expect(restarted.loader.getPlugin('p1')?.config).toEqual({});
+    expect(operatorSettings(restarted.storage.getPluginEntry('p1'))).toEqual(emptied);
+  });
+
+  it('takes config and session writes again once an uninstall leaves the plugin loaded', async () => {
+    const lifecycle = (gateway.loader as unknown as { lifecycle: { unloadPlugin(id: string): Promise<void> } })
+      .lifecycle;
+    jest.spyOn(lifecycle, 'unloadPlugin').mockRejectedValueOnce(new Error('onUnload failed'));
+
+    await expect(gateway.controller.uninstall('p1')).rejects.toThrow('onUnload failed');
+
+    expect(gateway.loader.getPlugin('p1')).toBeDefined();
+    expect(gateway.controller.updateConfig('p1', { config: { token: 'new-secret' } }).success).toBe(true);
+    expect(onDisk()?.config).toEqual({ token: 'new-secret' });
   });
 
   it('removes the leftover entry when the uninstall is repeated with a writable registry', async () => {

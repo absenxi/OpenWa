@@ -22,6 +22,7 @@ import type { PluginConfigSchema } from '../../core/plugins';
 import { PluginDto } from './dto/plugin.dto';
 import { redactSecretConfig, restoreSecretConfig } from './redact-config';
 import { restorableConfig } from '../../core/plugins/plugin-activation';
+import { PluginUninstallingError } from '../../core/plugins/plugin-uninstaller';
 import { parsePluginPackage } from './plugin-installer';
 import { assertDownloadSha256, assertPluginInstallUrl, fetchSafeBuffer } from './plugin-download';
 import { annotateCatalog, CatalogEntry, CatalogPlugin, isCatalogEntry } from './catalog';
@@ -243,6 +244,7 @@ export class PluginsService {
       this.pluginLoader.setPluginSessions(id, sessions, { mustPersist: true });
     } catch (error) {
       if (error instanceof PluginRegistryWriteError) throw new InternalServerErrorException(error.message);
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       throw new BadRequestException(error instanceof Error ? error.message : String(error));
     }
     return this.findOne(id);
@@ -264,6 +266,7 @@ export class PluginsService {
       this.pluginLoader.updatePluginConfig(id, merged, { mustPersist: true });
       return { success: true, message: `Plugin ${id} configuration updated` };
     } catch (error) {
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       return {
         success: false,
         message: error instanceof Error ? error.message : String(error),
@@ -301,6 +304,7 @@ export class PluginsService {
       this.pluginLoader.setPluginSessionConfig(id, sessionId, merged, { mustPersist: true });
       return { success: true, message: `Plugin ${id} configuration for session ${sessionId} updated` };
     } catch (error) {
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       return {
         success: false,
         message: error instanceof Error ? error.message : String(error),
