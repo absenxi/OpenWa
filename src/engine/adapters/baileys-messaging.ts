@@ -425,7 +425,10 @@ export class BaileysMessaging {
     // campaign whose template carries a slow or dead URL from stalling on every single message.
     // getUrlInfo above is still passed unconditionally, so the library's vulnerable generator stays
     // unreachable on the paths that do generate.
-    const content = {
+    //
+    // Built by send() only once the recipient has passed its check, so a number that is not on WhatsApp
+    // costs no preview image fetch, conversion or upload, and its 400 is not hidden behind an image error.
+    const content = async () => ({
       text,
       ...this.withMentions(mentions),
       ...(sendOptions?.linkPreview === true ? {} : { linkPreview: null }),
@@ -443,7 +446,7 @@ export class BaileysMessaging {
             },
           }
         : {}),
-    };
+    });
     const sent = await this.send(jid, content, options);
     if (sent) {
       void this.host.putStoredMessage(sent)?.catch(err =>
@@ -1034,10 +1037,13 @@ export class BaileysMessaging {
    *
    * A send that fails after a stop or logout has torn its socket down is not ready (409), the same as
    * one interrupted before it reached the socket; a failure on a socket still in place propagates.
+   *
+   * `content` may be a function, for content that costs work to build (a link preview image): it is
+   * called after the recipient check, and its own errors are not send refusals.
    */
   private async send(
     jid: string,
-    content: Parameters<WASocket['sendMessage']>[1],
+    content: Parameters<WASocket['sendMessage']>[1] | (() => Promise<Parameters<WASocket['sendMessage']>[1]>),
     options?: Parameters<WASocket['sendMessage']>[2],
     expected?: WASocket,
   ): Promise<WAMessage | undefined> {
@@ -1055,16 +1061,17 @@ export class BaileysMessaging {
       const canonical = this.host.toEngineJid(numberId);
       if (canonical !== jid) jid = await this.toDeliverableJid(numberId);
     }
+    const message = typeof content === 'function' ? await content() : content;
     if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
     let sent: WAMessage | undefined;
     try {
-      sent = options ? await sock.sendMessage(jid, content, options) : await sock.sendMessage(jid, content);
+      sent = options ? await sock.sendMessage(jid, message, options) : await sock.sendMessage(jid, message);
     } catch (error) {
       if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
       throw mapSendRefusal(error);
     }
     // Mutations are announced by their library echo; no local callback replaces it.
-    if (!('react' in content || 'delete' in content || 'edit' in content)) this.host.rememberOwnSend(sent?.key?.id);
+    if (!('react' in message || 'delete' in message || 'edit' in message)) this.host.rememberOwnSend(sent?.key?.id);
     return sent;
   }
 
