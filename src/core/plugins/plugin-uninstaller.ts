@@ -163,8 +163,9 @@ export class PluginUninstaller {
     } catch (error) {
       if (!(error instanceof PluginRegistryWriteError)) throw error;
       // The plugin is gone by now, so this no longer fails the uninstall. The entry stays, emptied before the
-      // removal began (and again here, in memory at least, for a change that landed meanwhile): no boot prunes
-      // it (it is only reported as a plugin without code), and repeating the uninstall removes it.
+      // removal began; no operator write reached it since (refused during the unload, not found after), so the
+      // clear below only re-asserts that in memory. No boot prunes the entry (it is only reported as a plugin
+      // without code), and repeating the uninstall removes it.
       this.pluginStorage.clearOperatorSettings(pluginId);
       registryEntryKept = true;
       this.logger.warn(`Plugin ${pluginId} uninstalled, but its registry entry could not be removed`, {

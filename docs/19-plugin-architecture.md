@@ -619,7 +619,8 @@ per-session config and enable decision, then disables + unloads, deletes the plu
 `ctx.storage` data dir, and drops the entry last (built-ins are protected and cannot be uninstalled). A
 `registry.json` that cannot take the first write refuses the uninstall with nothing changed. A package or
 storage folder that cannot be removed fails the uninstall and leaves the emptied entry, so the same call can
-be repeated, and a package left behind boots disabled and unconfigured; such a failure is still audited, as
+be repeated, and a package left behind boots disabled, configured only by what its enabled integration
+instances project onto it at boot (see below); such a failure is still audited, as
 `plugin_uninstalled` with `partial: true` and the error. When only the final delete fails, the answer is a
 success that says the emptied entry stayed and names the call to repeat: a reinstall of the id gets nothing
 back from that entry, a restart only reports it as a plugin with no code, and the same call removes it once the
@@ -630,8 +631,13 @@ dispatches `onUnload`: for a sandboxed plugin it runs in the worker between `onD
 (a plain disable does NOT fire `onUnload`; disable is reversible and its cleanup hook is `onDisable`).
 Uninstall also hands every chat the plugin had taken over back to the bot. The plugin's integration
 instances, with their encrypted secrets, and its stored deliveries stay in the database, so a reinstall finds
-its provider webhooks still pointing at live instance ids; remove an instance for good with
-`DELETE /api/integration/plugins/:pluginId/instances/:instanceId`, which works with the plugin gone.
+its provider webhooks still pointing at live instance ids. They also outlive the emptied registry entry: every
+boot that loads the id (after a reinstall, or with a package a part-way uninstall left behind) projects every
+enabled instance back onto the plugin and into `registry.json`, its config into
+the per-session config of its scope (a wildcard instance's into the base config, secrets included) and its
+scope into the session activation. Remove an instance for good, before the reinstall when it should start
+with none of them, with `DELETE /api/integration/plugins/:pluginId/instances/:instanceId`, which works with
+the plugin gone.
 
 **Context.** `PluginCapabilityContext.createPluginContext` (`src/core/plugins/plugin-capability-context.ts`) builds the `PluginContext` (§19.4): a per-plugin logger,
 `registerHook` (wrapped with the per-session activation gate), `registerWebhook`, the live

@@ -6536,6 +6536,8 @@ Note: this DELETE returns `200` with a body (not the usual `204`).
 
 When only the final registry delete fails, the answer is `200` with a message that the emptied entry stayed and that names this call; repeat it once the registry is writable. The plugin is no longer listed by `GET /api/plugins`, so the dashboard has no card left to repeat it from. A `400` raised after the entry was emptied is still audited, as `plugin_uninstalled` with `partial: true` and the error. While the uninstall unloads the plugin, `PUT /api/plugins/:id/config`, `PUT /api/plugins/:id/config/:sessionId` and `PUT /api/plugins/:id/sessions` for it answer `409` and change nothing.
 
+The plugin's integration instances are not removed. Every boot that loads the id (after a reinstall, or with a package a part-way uninstall left behind) projects every enabled instance back onto the plugin: its config (secrets included) and its session scope. For a reinstall that starts with none of them, delete them first with `DELETE /api/integration/plugins/:pluginId/instances/:instanceId`, which works with the plugin gone.
+
 ---
 
 #### POST /api/integration/instances/:pluginId/:instanceId/redrive
