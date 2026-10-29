@@ -6417,7 +6417,7 @@ Update a plugin's base configuration object.
 
 Update failures are returned in-band as `{ "success": false, "message": "…" }` (HTTP 200).
 
-**Errors:** `400` extra top-level field · `401` · `403` · `404` unknown id
+**Errors:** `400` extra top-level field · `401` · `403` · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed
 
 ---
 
@@ -6450,7 +6450,7 @@ Set (or clear) a plugin config override for a specific session.
 { "success": true, "message": "Plugin chat-flow configuration for session session-1 updated" }
 ```
 
-**Errors:** `400` plugin is global (not session-scoped) / extra field · `401` · `403` · `404` unknown id
+**Errors:** `400` plugin is global (not session-scoped) / extra field · `401` · `403` · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed
 
 ---
 
@@ -6478,7 +6478,7 @@ Set which sessions a session-scoped plugin is activated for. This is a **full re
 
 **Response** `200` — the updated `PluginDto` (reflecting the new `activeSessions`).
 
-**Errors:** `400` plugin is global · `401` · `403` key is session-scoped (full activation replacement requires an unrestricted key) · `404` unknown id · `500` the plugin registry could not be written; nothing changed
+**Errors:** `400` plugin is global · `401` · `403` key is session-scoped (full activation replacement requires an unrestricted key) · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed · `500` the plugin registry could not be written; nothing changed
 
 ---
 
