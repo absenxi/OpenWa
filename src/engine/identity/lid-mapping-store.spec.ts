@@ -3257,6 +3257,48 @@ describe('LidMappingStoreService: second-lid checks on a real table', () => {
     expect(pairsOf(reports)).toEqual(numbers);
   });
 
+  // A PostgreSQL pool can commit two writes of one lid out of the order they were issued (one waits for a fresh
+  // connection while the other takes an idle one). Here the older write is issued once the newer has committed,
+  // and both return to the store after that, the newer first.
+  it('checks the newer number of a lid whose older write commits after it', async () => {
+    const { repo } = await storeOn();
+    await repo.insert([
+      { lid: '333', phone: '628777', isReported: true },
+      { lid: '444', phone: '628888', isReported: true },
+    ]);
+    const { store, reports, find } = await storeOn();
+    const upsert = repo.upsert.bind(repo);
+    let issueOlder: () => void = () => undefined;
+    let returnOlder: () => void = () => undefined;
+    const issued = new Promise<void>(resolve => (issueOlder = resolve));
+    const returned = new Promise<void>(resolve => (returnOlder = resolve));
+    let olderStored: Promise<unknown> = Promise.resolve();
+    jest
+      .spyOn(repo, 'upsert')
+      .mockImplementationOnce((entity, options) => {
+        const stored = issued.then(() => upsert(entity, options));
+        olderStored = stored;
+        return stored.then(result => returned.then(() => result));
+      })
+      .mockImplementationOnce(async (entity, options) => {
+        const result = await upsert(entity, options);
+        issueOlder();
+        await olderStored;
+        return result;
+      });
+
+    const older = store.remember('222', '628777', 's1');
+    await expect(store.remember('222', '628888', 's1')).resolves.toBe(true);
+    returnOlder();
+    await expect(older).resolves.toBe(true);
+    await sync(store, [], find);
+    expect((await repo.findOneBy({ lid: '222' }))?.phone).toBe('628777');
+
+    await sync(store, [['222', '628888']], find); // the next report of the number this node holds
+    expect((await repo.findOneBy({ lid: '222' }))?.phone).toBe('628888');
+    expect(pairsOf(reports)).toEqual(['628777:222|333', '628888:222|444']);
+  });
+
   it('checks nothing when a sync replays pairs the mapping cache holds', async () => {
     const { repo } = await storeOn();
     const rows = [...singles, ...earlier, ...later].map(([lid, phone]) => ({ lid, phone, isReported: true }));

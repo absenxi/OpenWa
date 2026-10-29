@@ -675,7 +675,15 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       const queued = [...lids.keys()];
       const held = found[phone] ?? [];
       queued.forEach((newLid, i) => {
-        if (!held.includes(newLid)) return; // its row holds another phone by now
+        if (!held.includes(newLid)) {
+          // Its row holds another phone by now. If this node still holds this one for it, the row is another node's or
+          // an older write that committed last (a pool can reorder commits): the next write of this phone to land
+          // checks it again.
+          const check = lids.get(newLid);
+          if (check && this.lidToPhone.get(newLid) === phone && !this.secondLidOwed.has(newLid))
+            this.oweSecondLid(newLid, { ...check, queued: false });
+          return;
+        }
         for (const previousLid of held) {
           // Itself, or a lid whose write landed later in this window and names this one previous.
           if (queued.indexOf(previousLid) >= i || !this.firstReport(phone, previousLid, newLid)) continue;
