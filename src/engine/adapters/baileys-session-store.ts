@@ -233,6 +233,12 @@ export class BaileysSessionStore {
    * message cleared stays cleared here while the store's forget is still on its way.
    */
   private readonly deletionMarks: LruMap<string, DeletionMark>;
+  /**
+   * Chat updates refused in their deletion's own second, by the id of the message each announces, with that
+   * deletion. The update a new message brings can come before the message is recorded, and only the record
+   * tells whether the message came after the deletion (see {@link recordMessage}).
+   */
+  private readonly heldChatUpdates: LruMap<string, { mark: DeletionMark; chatId: string; update: Partial<Chat> }>;
 
   /**
    * @param lidStore       optional persisted, cross-session lid->phone table that backs resolution beyond
@@ -263,6 +269,7 @@ export class BaileysSessionStore {
     // Double-keyed (raw + neutral JID per chat), so it needs two slots per chat to cover the same span.
     this.ephemeralByChat = new LruMap(maxEntries * 2);
     this.deletionMarks = new LruMap(maxEntries);
+    this.heldChatUpdates = new LruMap(maxEntries);
   }
 
   upsertContacts(records: Partial<BaileysContact>[] = []): void {
@@ -328,7 +335,14 @@ export class BaileysSessionStore {
       // A chat WhatsApp deleted takes no update until a message re-creates it: Baileys applies an own
       // write locally (a mute or pin is sent without a message), and a reconnect resyncs a deletion before
       // an archive or pin made ahead of it. Kept, either would show on the chat a later message re-creates.
-      if (this.stillDeleted(r.id, this.toUnixSeconds(r.conversationTimestamp))) {
+      const timestamp = this.toUnixSeconds(r.conversationTimestamp);
+      if (this.stillDeleted(r.id, timestamp)) {
+        // The update of a message from the deletion's own second waits for that message's record.
+        const messageId = r.messages?.[0]?.message?.key?.id;
+        const mark = messageId ? this.deletionMark(this.markKeys(r.id)) : undefined;
+        if (messageId && mark && timestamp === Math.floor(mark.at / 1000)) {
+          this.heldChatUpdates.set(messageId, { mark, chatId: r.id, update: r });
+        }
         continue;
       }
       const existing = this.chats.get(r.id) ?? { id: r.id };
@@ -477,8 +491,7 @@ export class BaileysSessionStore {
     const store = this.chatStateStore;
     const sid = this.sessionId;
     if (!store || !sid) return false;
-    const key = this.stateKey(jid);
-    const lookup = [key, ...this.stateTwins([jid], key, new Map())];
+    const lookup = this.markKeys(jid);
     const mark = this.deletionMark(lookup);
     if (mark) {
       if (mark.cleared) return false;
@@ -502,6 +515,12 @@ export class BaileysSessionStore {
       rows.map(r => r.k),
     );
     return false;
+  }
+
+  /** The keys a deletion of the chat can be marked under: its state key and the lids its rows can sit under. */
+  private markKeys(jid: string): string[] {
+    const key = this.stateKey(jid);
+    return [key, ...this.stateTwins([jid], key, new Map())];
   }
 
   addLidMappings(mappings: { lid?: string; pn?: string }[] = [], isReported = true): void {
@@ -574,6 +593,22 @@ export class BaileysSessionStore {
     const timestamp = this.toUnixSeconds(msg.messageTimestamp);
     // Recorded either way: the readers skip a message from before the deletion, and a newer one clears it.
     this.stillDeleted(key, timestamp, order);
+    const messageId = msg.key.id ?? '';
+    const held = this.heldChatUpdates.get(messageId);
+    if (held) {
+      this.heldChatUpdates.delete(messageId);
+      // Its chat update came first and was refused; the message came after that deletion, so the chat takes it,
+      // beneath what was written to the chat since, as though it had been applied when it came. Not once the
+      // chat was deleted again: the message belongs to the conversation that deletion removed.
+      const { mark, chatId, update } = held;
+      if (mark.cleared && order > mark.order && this.deletionMark(this.markKeys(chatId)) === mark) {
+        if (this.chatTwins(chatId).some(k => this.chats.has(k))) {
+          this.chats.set(chatId, { ...update, ...this.chats.get(chatId) });
+        } else {
+          this.upsertChats([update]);
+        }
+      }
+    }
     if (!msg.key.fromMe) {
       const inbound = this.lastInbound.get(key);
       if (
