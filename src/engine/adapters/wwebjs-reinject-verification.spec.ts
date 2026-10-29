@@ -8,10 +8,10 @@ import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
 /**
  * WhatsApp Web's socket answers CONNECTED again after a page reload whether or not whatsapp-web.js managed to
  * re-inject into the new page, and the library's re-emitted 'ready' can come from a run that started in the
- * previous document. So while a reload of a ready page is unverified the liveness probe also asks the page for
- * whatsapp-web.js's helpers. It never answers dead for a reload that is merely slow, inside its grace or after it:
- * only once the helpers stayed missing past the episode cap, counted from the first reload since the page last
- * re-injected.
+ * previous document. So while a reload of a ready page is unverified the liveness probe, and every 'ready', also asks
+ * the page for whatsapp-web.js's helpers. It never answers dead for a reload that is merely slow, inside its grace or
+ * after it: only once the helpers stayed missing past the episode cap, counted from the first reload after the page
+ * was last found re-injected, or re-emitted 'ready' well after its own reload.
  */
 describe('liveness of a ready page after a reload', () => {
   type Page = EventEmitter & { evaluate: jest.Mock };
@@ -109,7 +109,8 @@ describe('liveness of a ready page after a reload', () => {
     client.pupPage.evaluate.mockResolvedValue(false);
     await expect(adapter.probeLiveness()).resolves.toBe(true);
 
-    expect(client.pupPage.evaluate).toHaveBeenCalledTimes(1);
+    // Once by the 'ready' itself and once by the probe that started before that read answered; never after.
+    expect(client.pupPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
   it('never answers dead inside the reload grace while the helpers are still missing', async () => {
@@ -387,6 +388,40 @@ describe('liveness of a ready page after a reload', () => {
       expect(recycled(answers)).toBe(true);
     },
   );
+
+  // A fast host re-injects 3 or 4.5 s after each reload, too soon to be trusted on its delay, and the page reloads in
+  // step with the watchdog, so each probe's helpers read lands just after a reload, before the helpers are back. The
+  // 'ready' of each re-inject asks the page itself, finds the helpers, and the session is kept.
+  it.each([
+    ['every 60 s, re-injected 3 s after each reload', 60_000, 3_000],
+    ['every 60 s, re-injected 4.5 s after each reload', 60_000, 4_500],
+    ['every 30 s, re-injected 4.5 s after each reload', 30_000, 4_500],
+  ])('keeps a page alive that keeps reloading and re-injects fast (%s)', async (_label, period, reinject) => {
+    const { adapter, client } = wire();
+    const reloads = Array.from({ length: Math.ceil(400_000 / period) }, (_, i) => 1_500 + i * period);
+    const reinjects = reloads.map(() => reinject);
+    reloadingPage(client, reloads, reinjects);
+
+    const answers = await watchdogAnswers(adapter, 6, { firstProbeAt: 60_000 });
+
+    expect(answers).toEqual([true, true, true, true, true, true]);
+  });
+
+  // The helpers read a 'ready' starts answers for the page it reached. One that answers only after a later reload
+  // landed may have read the page before it, so it verifies nothing: that later page never re-injects and is recycled.
+  it('does not let a helpers read that a reload overtook verify the page that reload loaded', async () => {
+    const { adapter, client } = wire();
+    reload(client);
+    client.pupPage.evaluate.mockReturnValueOnce(delayed(true, 2_000));
+    client.emit('ready');
+    await jest.advanceTimersByTimeAsync(1_000);
+    reload(client);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    client.pupPage.evaluate.mockReset().mockResolvedValue(false);
+    later(NAVIGATION_EPISODE_CAP_MS);
+    await expect(adapter.probeLiveness()).resolves.toBe(false);
+  });
 
   it('does not ask the page when no reload is pending', async () => {
     const { adapter, client } = wire();
