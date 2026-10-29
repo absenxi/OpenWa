@@ -566,7 +566,7 @@ function ChatThread({
                       ? 'audio'
                       : null;
               const waMessageId = msg.waMessageId;
-              if (mediaInfo.archived && previewKind && sessionId && waMessageId) {
+              if ((mediaInfo.archived || msg.type === 'video') && previewKind && sessionId && waMessageId) {
                 return (
                   <ArchivedMediaPreview
                     key={`${sessionId}:${activeChat.id}:${waMessageId}`}

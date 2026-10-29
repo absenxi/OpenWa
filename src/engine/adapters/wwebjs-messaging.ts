@@ -133,7 +133,18 @@ export async function downloadMediaInPage(args: {
   if (msg.mediaData.mediaStage !== 'RESOLVED') {
     await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
   }
-  if (msg.mediaData.mediaStage.includes('ERROR') || msg.mediaData.mediaStage === 'FETCHING') return undefined;
+  if (msg.mediaData.mediaStage.includes('ERROR')) return undefined;
+  if (msg.mediaData.mediaStage === 'FETCHING' || msg.mediaData.mediaStage === 'INIT') {
+    const start = Date.now();
+    while (
+      (msg.mediaData.mediaStage === 'FETCHING' || msg.mediaData.mediaStage === 'INIT') &&
+      Date.now() - start < 25000
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  if (msg.mediaData.mediaStage.includes('ERROR')) return undefined;
+  if (msg.mediaData.mediaStage === 'FETCHING' && (!msg.directPath || !msg.mediaKey)) return undefined;
   try {
     const noopQpl = {
       addAnnotations() {
@@ -1192,5 +1203,24 @@ export class WwebjsMessaging {
       throw new EngineRefusedError(`the unpin of message ${messageId} was rejected — in a group only admins may unpin`);
     }
     this.host.logger.debug('Unpinned message', { chatId, messageId });
+  }
+
+  async downloadMessageMedia(messageId: string): Promise<{ buffer: Buffer; mimetype: string } | null> {
+    this.host.ensureReady();
+    return this.withPage('downloadMessageMedia', async () => {
+      const page = this.client().pupPage;
+      if (!page) return null;
+      const download = await page.evaluate(downloadMediaInPage, {
+        msgId: messageId,
+        maxBytes: inboundMediaMaxBytes(),
+      });
+      if (download && download.data) {
+        return {
+          buffer: Buffer.from(download.data, 'base64'),
+          mimetype: download.mimetype,
+        };
+      }
+      return null;
+    });
   }
 }

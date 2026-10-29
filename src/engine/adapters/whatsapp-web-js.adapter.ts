@@ -718,6 +718,10 @@ export class WhatsAppWebJsAdapter implements IWhatsAppEngine {
     return this.messaging.getChatHistory(chatId, limit, includeMedia, mediaMaxBytes, signal);
   }
 
+  downloadMessageMedia(chatId: string, messageId: string): Promise<{ buffer: Buffer; mimetype: string } | null> {
+    return this.messaging.downloadMessageMedia(messageId);
+  }
+
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
     return this.messaging.starMessage(chatId, messageId, star);
   }

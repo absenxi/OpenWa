@@ -1274,6 +1274,9 @@ export interface ChatHistoryCapability {
     mediaMaxBytes?: number,
     signal?: AbortSignal,
   ): Promise<IncomingMessage[]>;
+
+  /** On-demand download of a specific message's media directly from the engine. */
+  downloadMessageMedia?(chatId: string, messageId: string): Promise<{ buffer: Buffer; mimetype: string } | null>;
 }
 
 /**

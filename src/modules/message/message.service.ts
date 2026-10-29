@@ -609,6 +609,27 @@ export class MessageService implements PluginMessagePort {
       // base64 would serve garbage, so report it as absent. Same discriminator as the send path.
       /^https?:\/\//i.test(inline.data)
     ) {
+      if (row && row.type !== 'revoked' && this.engines.has(sessionId)) {
+        try {
+          const engine = this.getEngine(sessionId);
+          if (typeof engine.downloadMessageMedia === 'function') {
+            const downloaded = await engine.downloadMessageMedia(chatId, messageId);
+            if (downloaded) {
+              row.metadata = {
+                ...((row.metadata as Record<string, unknown>) || {}),
+                media: {
+                  mimetype: downloaded.mimetype,
+                  data: downloaded.buffer.toString('base64'),
+                },
+              };
+              await this.messageRepository.save(row);
+              return { buffer: downloaded.buffer, mimetype: inertMimetype(downloaded.mimetype) };
+            }
+          }
+        } catch {
+          // Engine download failed, fall through
+        }
+      }
       throw new NotFoundException('No media stored for this message');
     }
     return { buffer: Buffer.from(inline.data, 'base64'), mimetype: inertMimetype(inline.mimetype) };
