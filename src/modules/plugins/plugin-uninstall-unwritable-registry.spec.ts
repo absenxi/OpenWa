@@ -112,6 +112,8 @@ describe('Uninstall when registry.json cannot be written', () => {
     expect(fs.existsSync(packageDir)).toBe(false);
     expect(result.success).toBe(true);
     expect(result.message).toMatch(/keeps its entry, emptied of config, sessions and the enable decision/);
+    // The plugin is no longer listed, so the answer names the call that removes the entry.
+    expect(result.message).toMatch(/until DELETE \/api\/plugins\/p1 is repeated once the registry is writable$/);
     expect(gateway.logInfo).toHaveBeenCalledWith(AuditAction.PLUGIN_UNINSTALLED, {
       sessionId: undefined,
       metadata: { pluginId: 'p1' },

@@ -1377,6 +1377,7 @@
       "installed": "تم تثبيت الإضافة",
       "installFailed": "فشل التثبيت",
       "uninstalled": "تمت إزالة الإضافة",
+      "uninstalledWithWarning": "تمت إزالة الإضافة مع تحذير",
       "uninstallFailed": "فشلت الإزالة",
       "enableFailedTitle": "فشل التفعيل",
       "disableFailedTitle": "فشل التعطيل",

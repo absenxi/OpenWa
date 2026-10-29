@@ -735,12 +735,13 @@ export class PluginsService {
     try {
       const { registryEntryKept } = await this.pluginLoader.uninstallPlugin(id);
       if (registryEntryKept) {
+        // The plugin has no card left on the Plugins page, so the answer names the call that removes the entry.
         return {
           success: true,
           message:
             `Plugin ${id} uninstalled, but the plugin registry could not be written: registry.json keeps its entry, ` +
             'emptied of config, sessions and the enable decision, reported at startup as a plugin with no code ' +
-            'until the uninstall is repeated',
+            `until DELETE /api/plugins/${id} is repeated once the registry is writable`,
         };
       }
       return { success: true, message: `Plugin ${id} uninstalled successfully` };

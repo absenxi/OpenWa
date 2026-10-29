@@ -1340,6 +1340,7 @@
       "installed": "插件已安装",
       "installFailed": "安装失败",
       "uninstalled": "插件已卸载",
+      "uninstalledWithWarning": "插件已卸载，但有警告",
       "uninstallFailed": "卸载失败",
       "enableFailedTitle": "启用失败",
       "disableFailedTitle": "停用失败",

@@ -1340,6 +1340,7 @@
       "installed": "Eklenti yüklendi",
       "installFailed": "Yükleme başarısız",
       "uninstalled": "Eklenti kaldırıldı",
+      "uninstalledWithWarning": "Eklenti kaldırıldı, bir uyarıyla",
       "uninstallFailed": "Kaldırma başarısız",
       "enableFailedTitle": "Etkinleştirme başarısız",
       "disableFailedTitle": "Devre dışı bırakma başarısız",

@@ -1340,6 +1340,7 @@
       "installed": "प्लगइन इंस्टॉल किया गया",
       "installFailed": "इंस्टॉल विफल",
       "uninstalled": "प्लगइन अनइंस्टॉल किया गया",
+      "uninstalledWithWarning": "प्लगइन अनइंस्टॉल किया गया, चेतावनी के साथ",
       "uninstallFailed": "अनइंस्टॉल विफल",
       "enableFailedTitle": "सक्षम करना विफल",
       "disableFailedTitle": "अक्षम करना विफल",
