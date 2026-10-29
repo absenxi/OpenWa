@@ -3000,6 +3000,32 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
     expect(reports).toEqual([{ phone: '628777', previousLid: '333', newLid: '222', sessionId: 's2' }]);
   });
 
+  // A history and a contact sync report one new pairing together; the first write lands and its check's read fails
+  // while the second write still waits on the database.
+  it('checks a new lid when an overlapping write of it lands after its table read failed', async () => {
+    const { repo, store, reports } = await watched([{ lid: '111', phone: '628999', sessionId: 's1' }]);
+    const { read, fail } = holdPhoneReads(repo);
+    const upsert = repo.upsert.getMockImplementation() as (values: Partial<LidMapping>) => Promise<object>;
+    let land: () => void = () => undefined;
+
+    const first = store.remember('222', '628999', 's2'); // lands at once
+    repo.upsert.mockImplementationOnce(
+      (values: Partial<LidMapping>) => new Promise(resolve => (land = () => resolve(upsert(values)))),
+    );
+    const second = store.remember('222', '628999', 's2'); // the same pairing again, held open
+    await expect(first).resolves.toBe(true);
+    await until(() => fail.length > 0);
+    fail[0](new Error('connection reset'));
+    await until(() => owedChecks(store).has('222'));
+    repo.find.mockImplementation(read);
+    land();
+    await expect(second).resolves.toBe(true);
+    await until(() => reports.length > 0);
+
+    expect(reports).toEqual([{ phone: '628999', previousLid: '111', newLid: '222', sessionId: 's2' }]);
+    expect(owedChecks(store).size).toBe(0);
+  });
+
   it('logs a failed read at most once a minute, with a count', async () => {
     const { repo, store, warn } = await watched([{ lid: '111', phone: '628999' }]);
     let clock = 0;

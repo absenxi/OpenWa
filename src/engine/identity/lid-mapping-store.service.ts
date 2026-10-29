@@ -507,7 +507,11 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
         }
         if (sessionId && this.seenBy.get(lid) === reporters) reporters.add(sessionId);
       }
+      // A check owed again after its read failed is a copy no write already in flight carries. The lid's latest report
+      // takes it when it lands with that phone; an older one could run it before a newer write moves the row.
+      const again = writing.latestReport === report ? this.secondLidOwed.get(lid) : undefined;
       if (owed && owed.phone === phone) this.queueSecondLid(lid, owed);
+      if (again?.phone === phone) this.queueSecondLid(lid, again);
       return true;
     } catch (err) {
       this.warnWriteFailed(
