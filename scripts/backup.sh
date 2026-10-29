@@ -41,7 +41,8 @@
 #   POSTGRES_SCHEMA   for postgres: a schema other than public is dumped alone (the database may hold
 #                     other applications' schemas), with the pg_trgm and unaccent extensions, behind a
 #                     prelude that moves an existing copy of the schema aside on load; database.schema
-#                     in the archive names it. public dumps the whole database, as before.
+#                     in the archive names it. That dump needs pg_dump 14 or newer (the image ships
+#                     17), which the run checks first. public dumps the whole database, as before.
 #   For postgres: DATABASE_URL, or DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME
 #                     DATABASE_URL is read by this script only (the app uses the DATABASE_* keys)
 #                     and wins over them when set. It is passed to pg_dump as an argument, which
@@ -286,6 +287,15 @@ if [ "$DATABASE_TYPE" = "postgres" ]; then
       exit 1
     fi
     PG_DUMP_SCHEMA="$PG_SCHEMA"
+    # The scoped dump names its extensions with -e, which pg_dump has had since 14: an older client stops at
+    # "unrecognized option" once the dump starts, so it is refused before anything is dumped.
+    PG_DUMP_VERSION="$(pg_dump --version 2>&1 || true)"
+    PG_DUMP_MAJOR_RE='\) ([0-9]+)'
+    if ! [[ "$PG_DUMP_VERSION" =~ $PG_DUMP_MAJOR_RE ]] || [ "${BASH_REMATCH[1]}" -lt 14 ]; then
+      log "ERROR: POSTGRES_SCHEMA=$PG_SCHEMA is dumped with pg_dump --extension, which needs pg_dump 14 or newer"
+      log "       (the image ships 17); this one reports: $PG_DUMP_VERSION"
+      exit 1
+    fi
   fi
   # libpq defaults to sslmode=prefer, which falls back to plaintext and accepts any certificate, so
   # the dump sent the database password past the TLS check the app makes. Apply the app's check:

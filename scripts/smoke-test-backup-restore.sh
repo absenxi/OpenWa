@@ -100,9 +100,9 @@
 #   (av) a PostgreSQL POSTGRES_SCHEMA other than public, from the environment, ./.env or .env.generated, is
 #       dumped alone with its search extensions behind a prelude that drops none of them with CASCADE, for the
 #       DATABASE_URL branch too, and named in database.schema; public keeps the whole-database dump; a name the
-#       app refuses stops the backup before pg_dump; restore prints the schema load, with the extensions' owner
-#       and the way past another deployment's trigram index, only for a marked archive, in one transaction
-#       either way, and refuses a marker naming an invalid schema
+#       app refuses, or a pg_dump older than 14, stops the backup before it dumps anything; restore prints the
+#       schema load, with the extensions' owner and the way past another deployment's trigram index, only for a
+#       marked archive, in one transaction either way, and refuses a marker naming an invalid schema
 #
 # Usage: ./scripts/smoke-test-backup-restore.sh
 # Requires: bash, tar, node (restore.sh path resolution). sqlite3 is optional (see (c) and (k)).
@@ -2910,6 +2910,10 @@ mkdir -p "$AV/data" "$AV/bin"
 make_fixture "$AV/data/main.sqlite" "av-main"
 cat >"$AV/bin/pg_dump" <<EOF
 #!/bin/sh
+if [ "\$1" = --version ]; then
+  echo "pg_dump (PostgreSQL) \${AV_PG_DUMP_VERSION:-17.6 (Debian 17.6-1.pgdg13+1)}"
+  exit 0
+fi
 printf '%s|' "\$@" >"$AV/pg_dump-args"
 echo '-- dump'
 EOF
@@ -2959,6 +2963,21 @@ rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s DATABASE_URL=postgres://app
 if [ "$rc" -ne 0 ] ||
   [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-n|openwa_s|--no-comments|-e|plpgsql|-e|pg_trgm|-e|unaccent|postgres://app@db/shared|" ]; then
   fail "(av) DATABASE_URL did not get the scoped dump (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+fi
+# The scoped dump names its extensions with -e, which pg_dump has had since 14. An older client, or one whose
+# version cannot be read, stops the backup before it dumps or writes an archive, with a message naming 14; the
+# whole-database dump of public does not need it.
+for AV_OLD in 13.23 9.6.24 unknown; do
+  backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_DUMP_VERSION="$AV_OLD" >"$AV/rc"
+  rc="$(cat "$AV/rc")"
+  if [ "$rc" -eq 0 ] || [ -e "$AV/pg_dump-args" ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1 ||
+    ! grep -q 'needs pg_dump 14 or newer' <<<"$OUT_AV"; then
+    fail "(av) pg_dump $AV_OLD did not stop the scoped backup before the dump (rc $rc): $OUT_AV"
+  fi
+done
+rc="$(backup_av '' "$AV_PG" AV_PG_DUMP_VERSION=13.23)"
+if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-h|db|-p|5432|-U|app|shared|" ]; then
+  fail "(av) pg_dump 13 did not keep the whole-database dump of public (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
 fi
 # public, spelled out or left to the default, keeps the whole-database dump and no marker.
 for AV_PUBLIC in 'POSTGRES_SCHEMA=public\n' 'POSTGRES_SCHEMA=\n' ''; do

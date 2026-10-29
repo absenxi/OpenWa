@@ -745,7 +745,9 @@ User-managed files outside that list (for example the project-level `.env`) must
 #   - openwa.sqlite — user data                      (DATABASE_NAME, default ./data/openwa.sqlite;
 #                                                     or a pg_dump when DATABASE_TYPE=postgres; a
 #                                                     POSTGRES_SCHEMA other than public is dumped
-#                                                     alone, and database.schema names it)
+#                                                     alone, and database.schema names it; that
+#                                                     dump needs pg_dump 14 or newer, and the
+#                                                     image ships 17)
 #   - sessions/     — whatsapp-web.js state (SESSION_DATA_PATH)
 #   - baileys/      — Baileys credentials (BAILEYS_AUTH_DIR)
 #   - media/        — local media                    (STORAGE_LOCAL_PATH, archived whenever present; with
