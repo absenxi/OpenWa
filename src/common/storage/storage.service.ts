@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,7 +17,13 @@ import { createLogger } from '../services/logger.service';
 import { positiveIntFromEnv } from '../utils/env-int';
 import { isSafeStorageKey } from '../utils/path-safety';
 import { DEFAULT_S3_KEY_PREFIX, normalizeS3KeyPrefix } from './s3-key-prefix';
-import { createExportStream, ExportFileSource, importFromStream, isMissingObjectError } from './storage-transfer';
+import {
+  createExportStream,
+  DownloadsBusyException,
+  ExportFileSource,
+  importFromStream,
+  isMissingObjectError,
+} from './storage-transfer';
 import { iterateLocalFiles, getLocalFile, openLocalFile, putLocalFile, deleteLocalFile } from './storage-local-files';
 
 // Re-exported so feature modules keep importing it next to StorageService.
@@ -570,7 +576,7 @@ export class StorageService implements OnModuleDestroy {
     // Only the stream client, whose pool serves the downloads, is bounded. Checked and taken before any await.
     let held = client === this.s3StreamClient;
     if (held && this.s3OpenDownloads >= S3_MAX_OPEN_DOWNLOADS) {
-      throw new ServiceUnavailableException('Too many media downloads are in progress; retry shortly');
+      throw new DownloadsBusyException();
     }
     if (held) this.s3OpenDownloads++;
     const release = (): void => {
