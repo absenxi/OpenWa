@@ -38,6 +38,7 @@
     "optional": "可选",
     "fieldTooLong": "最多 {{max}} 个字符（当前 {{count}} 个）。",
     "language": "语言",
+    "changeLanguage": "切换语言",
     "back": "返回",
     "next": "下一步",
     "previous": "上一步",

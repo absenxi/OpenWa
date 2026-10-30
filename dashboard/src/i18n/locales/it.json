@@ -40,6 +40,7 @@
     "optional": "opzionale",
     "fieldTooLong": "Limitato a {{max}} caratteri (ora {{count}}).",
     "language": "Lingua",
+    "changeLanguage": "Cambia lingua",
     "back": "Indietro",
     "next": "Avanti",
     "previous": "Precedente",

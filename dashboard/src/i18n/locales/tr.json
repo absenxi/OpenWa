@@ -38,6 +38,7 @@
     "optional": "isteğe bağlı",
     "fieldTooLong": "En fazla {{max}} karakter olabilir (şu an {{count}}).",
     "language": "Dil",
+    "changeLanguage": "Dili değiştir",
     "back": "Geri",
     "next": "İleri",
     "previous": "Önceki",

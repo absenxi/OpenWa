@@ -38,6 +38,7 @@
     "optional": "वैकल्पिक",
     "fieldTooLong": "{{max}} वर्णों तक सीमित (अभी {{count}})।",
     "language": "भाषा",
+    "changeLanguage": "भाषा बदलें",
     "back": "पीछे",
     "next": "अगला",
     "previous": "पिछला",

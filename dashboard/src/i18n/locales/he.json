@@ -42,6 +42,7 @@
     "optional": "אופציונלי",
     "fieldTooLong": "מוגבל ל-{{max}} תווים (כרגע {{count}}).",
     "language": "שפה",
+    "changeLanguage": "שינוי שפה",
     "back": "חזרה",
     "next": "הבא",
     "previous": "הקודם",

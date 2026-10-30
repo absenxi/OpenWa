@@ -38,6 +38,7 @@
     "optional": "optional",
     "fieldTooLong": "Auf {{max}} Zeichen begrenzt (aktuell {{count}}).",
     "language": "Sprache",
+    "changeLanguage": "Sprache ändern",
     "back": "Zurück",
     "next": "Weiter",
     "previous": "Zurück",

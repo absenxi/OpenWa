@@ -38,6 +38,7 @@
     "optional": "optional",
     "fieldTooLong": "Limited to {{max}} characters ({{count}} now).",
     "language": "Language",
+    "changeLanguage": "Change language",
     "back": "Back",
     "next": "Next",
     "previous": "Previous",
