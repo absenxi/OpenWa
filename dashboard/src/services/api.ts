@@ -827,9 +827,13 @@ async function handleErrorResponse<T>(response: Response, sentKey: string | null
   const err = new Error(error.message || `HTTP ${response.status}`) as Error & {
     status?: number;
     code?: string;
+    retryAfterSeconds?: number;
   };
   err.status = response.status;
   if (typeof error.code === 'string') err.code = error.code;
+  // Retry-After in seconds (an HTTP date is ignored): the media loaders wait at least that long before retrying a 503.
+  const retryAfter = Number(response.headers.get('Retry-After') ?? Number.NaN);
+  if (retryAfter >= 0) err.retryAfterSeconds = retryAfter;
   throw err;
 }
 
