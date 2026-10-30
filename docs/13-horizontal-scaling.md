@@ -48,6 +48,10 @@
 > `qr_ready` row is marked too while it has no phone, since the sweep never adopts a row without one;
 > a `qr_ready` row with a phone keeps its status, so the correction never makes it adoptable.
 > Nothing else revisits such a row, since the boot reset skips a foreign claim that is still live.
+> An adoption whose launch fails before its engine exists releases the claim and marks the row disconnected,
+> so the session is not offered to the sweep again: it waits for an explicit `POST /start` or the next boot's
+> auto-start. One whose engine fails to initialize is left failed, for an operator, like any failed start;
+> one whose initialization times out is left disconnected, so the next boot auto-starts it.
 > A session an operator stopped (`POST /stop` or `/force-kill`), or whose `DELETE` failed part-way or
 > died with its node, is never adopted, even when its claim did lapse, until an explicit `POST /start`.
 > While versions are mixed during an upgrade, a node still on 0.25.0 does not read a `DELETE`'s record:
