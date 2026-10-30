@@ -747,6 +747,7 @@ export function Sessions() {
               { value: 'inactive', label: t('sessions.filter.inactive') },
               { value: 'connecting', label: t('sessions.filter.connecting') },
             ]}
+            ariaLabel={t('sessions.details.status')}
           />
         </div>
       </div>

@@ -140,7 +140,8 @@ export function CustomSelect({ value, onChange, options, ariaLabel }: CustomSele
         onClick={toggle}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        aria-label={ariaLabel}
+        // What the control sets, then the value it shows: a name of the purpose alone would hide the shown value.
+        aria-label={ariaLabel && selectedLabel ? `${ariaLabel}, ${selectedLabel}` : ariaLabel}
       >
         <span className="custom-select-label">{selectedLabel}</span>
         <ChevronDown size={16} className={`custom-select-chevron ${isOpen ? 'open' : ''}`} />
