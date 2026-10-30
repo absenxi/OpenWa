@@ -1,4 +1,4 @@
-import type { WAMessage } from '@whiskeysockets/baileys';
+import type { Chat, WAMessage } from '@whiskeysockets/baileys';
 import { BaileysSessionStore } from './baileys-session-store';
 import {
   mergeTwinStates,
@@ -148,6 +148,150 @@ describe('Baileys chat deleted and then sent to within the same second', () => {
 
     expect(store.listChats()).toEqual([]);
     expect(store.chatDeletedAt(PHONE)).toBe(DELETED_AT_MS);
+  });
+});
+
+/**
+ * WhatsApp follows each message received with an update of its chat: the message's time, one more unread, and
+ * the message itself. The adapter applies that update at once, while the message is still on its way to its
+ * record, so in the deletion's own second the update arrives before anything shows the message is newer.
+ */
+describe('Baileys chat re-created by a message received in its deletion second', () => {
+  const SID = 'sess-1';
+  const PEER = '628111@s.whatsapp.net';
+  const DELETED_AT_MS = 1_800_000_000_400;
+  const received = (id: string, atMs: number): WAMessage => ({
+    key: { remoteJid: PEER, fromMe: false, id },
+    messageTimestamp: Math.floor(atMs / 1000),
+    message: { conversation: id },
+  });
+  const chatUpdate = (msg: WAMessage): Partial<Chat> => ({
+    id: PEER,
+    conversationTimestamp: Number(msg.messageTimestamp),
+    unreadCount: 1,
+    messages: [{ message: msg }],
+  });
+  const unreadCount = (store: BaileysSessionStore): number | undefined =>
+    store.listChats().find(chat => chat.id === '628111@c.us')?.unreadCount;
+
+  function readChat() {
+    const store = new BaileysSessionStore(undefined, SID, new FakeChatStateStore());
+    store.upsertChats([{ id: PEER, conversationTimestamp: 1_799_990_000, unreadCount: 0 }]);
+    return store;
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    ['the next second, its chat update first', 1_000, true],
+    ['the same second, its chat update first', 300, true],
+    ['the same second, its record first', 300, false],
+  ])('keeps the unread count of a message received in %s', (_label, afterMs, updateFirst) => {
+    const store = readChat();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + afterMs);
+    const msg = received('3EB0RECEIVEDAFTER', DELETED_AT_MS + afterMs);
+    // Its place in the order is taken on arrival, before the reads that delay its record.
+    const order = store.nextMessageOrder();
+
+    if (updateFirst) store.upsertChats([chatUpdate(msg)]);
+    store.recordMessage(msg, 'text', order);
+    if (!updateFirst) store.upsertChats([chatUpdate(msg)]);
+
+    expect(unreadCount(store)).toBe(1);
+  });
+
+  it('applies no update of a message received before the deletion, also once a later message re-creates the chat', () => {
+    const store = readChat();
+    const early = received('3EB0RECEIVEDBEFORE', DELETED_AT_MS - 200);
+    const earlyOrder = store.nextMessageOrder();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+
+    // Its chat update and its record land after the deletion, as when a media download delays them.
+    store.upsertChats([chatUpdate(early)]);
+    expect(store.listChats()).toEqual([]);
+    now.mockReturnValue(DELETED_AT_MS + 300);
+    store.recordMessage(
+      { key: { remoteJid: PEER, fromMe: true, id: '3EB0SENTAFTER' }, messageTimestamp: 1_800_000_000 },
+      'text',
+    );
+    store.recordMessage(early, 'text', earlyOrder);
+
+    expect(unreadCount(store)).toBe(0);
+  });
+
+  // An image in the deletion's second: its record waits on the download while newer updates of the chat land.
+  function slowImageThen(later: (store: BaileysSessionStore, now: jest.SpyInstance<number, []>) => void) {
+    const store = readChat();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 300);
+    const image = received('3EB0SLOWIMAGE', DELETED_AT_MS + 300);
+    const imageOrder = store.nextMessageOrder();
+    store.upsertChats([chatUpdate(image)]);
+    later(store, now);
+    store.recordMessage(image, 'image', imageOrder);
+    return store;
+  }
+  const nextMessage = (store: BaileysSessionStore, now: jest.SpyInstance<number, []>): void => {
+    now.mockReturnValue(DELETED_AT_MS + 2_000);
+    const text = received('3EB0FASTTEXT', DELETED_AT_MS + 2_000);
+    const order = store.nextMessageOrder();
+    store.upsertChats([chatUpdate(text)]);
+    store.recordMessage(text, 'text', order);
+  };
+  const chatRecord = (store: BaileysSessionStore): Partial<Chat> | undefined =>
+    (store as unknown as { chats: Map<string, Partial<Chat>> }).chats.get(PEER);
+
+  it('keeps a read made on the phone before the slow record lands', () => {
+    const store = slowImageThen((s, now) => {
+      nextMessage(s, now);
+      s.upsertChats([{ id: PEER, unreadCount: 0 }]);
+    });
+
+    expect(unreadCount(store)).toBe(0);
+  });
+
+  it('keeps the chat time of a newer message recorded before the slow one', () => {
+    const store = slowImageThen(nextMessage);
+
+    expect(Number(chatRecord(store)?.conversationTimestamp)).toBe(Math.floor((DELETED_AT_MS + 2_000) / 1000));
+  });
+
+  it('keeps the unread count of the slow message under an own send that carries none', () => {
+    const store = slowImageThen((s, now) => {
+      now.mockReturnValue(DELETED_AT_MS + 500);
+      const sent: WAMessage = {
+        key: { remoteJid: PEER, fromMe: true, id: '3EB0SENTAFTER' },
+        messageTimestamp: 1_800_000_000,
+        message: { conversation: 'sent' },
+      };
+      s.recordMessage(sent, 'text');
+      s.upsertChats([{ id: PEER, conversationTimestamp: 1_800_000_000, messages: [{ message: sent }] }]);
+    });
+
+    expect(unreadCount(store)).toBe(1);
+  });
+
+  it('adds no unread count from a message of the conversation the operator deleted again', () => {
+    const store = slowImageThen((s, now) => {
+      nextMessage(s, now);
+      now.mockReturnValue(DELETED_AT_MS + 5_000);
+      s.removeChats([PEER]);
+      // Written to again through the API: an own send, whose chat update carries no count.
+      now.mockReturnValue(DELETED_AT_MS + 7_000);
+      const sent: WAMessage = {
+        key: { remoteJid: PEER, fromMe: true, id: '3EB0SENTAGAIN' },
+        messageTimestamp: 1_800_000_007,
+        message: { conversation: 'sent' },
+      };
+      s.upsertChats([{ id: PEER, conversationTimestamp: 1_800_000_007, messages: [{ message: sent }] }]);
+      s.recordMessage(sent, 'text');
+    });
+
+    expect(unreadCount(store)).toBe(0);
   });
 });
 

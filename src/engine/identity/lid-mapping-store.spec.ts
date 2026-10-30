@@ -2516,6 +2516,13 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
   }
 
   const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+  /** Wait for a condition, up to a deadline; the expectations after it then show what is missing. */
+  const until = async (done: () => boolean, ms = 2000): Promise<void> => {
+    for (const end = Date.now() + ms; !done() && Date.now() < end;)
+      await new Promise(resolve => setTimeout(resolve, 2));
+  };
+  const owedChecks = (store: LidMappingStoreService) =>
+    (store as unknown as { secondLidOwed: Map<string, { phone: string }> }).secondLidOwed;
   const phoneReads = (repo: ReturnType<typeof makeFakeRepo>) =>
     repo.find.mock.calls.filter(([options]) => (options as { where?: { phone?: unknown } })?.where?.phone).length;
 
@@ -2864,6 +2871,37 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
     expect(capLines(warn)).toEqual([]);
   });
 
+  // The same sync reports every lid twice, and the second statement fails (SQLITE_BUSY) before the first lands.
+  it('owes no check and logs no drop while the first write of each lid of such a sync is in flight', async () => {
+    const saved = process.env.LID_MAPPING_CACHE_MAX;
+    process.env.LID_MAPPING_CACHE_MAX = '0'; // every lid stays cached, so the second report is not new
+    try {
+      const { repo, store, reports, warn } = await watched([{ lid: '111', phone: '628999' }]);
+      const upsert = repo.upsert.getMockImplementation() as (values: Partial<LidMapping>) => Promise<object>;
+      const land: Array<() => void> = [];
+      repo.upsert.mockImplementation(
+        (values: Partial<LidMapping>) => new Promise(resolve => land.push(() => resolve(upsert(values)))),
+      );
+      const lids = ['222', ...Array.from({ length: 10_001 }, (_, i) => `5${i}`)];
+      const phoneOf = (lid: string) => (lid === '222' ? '628999' : `62700${lid}`);
+      const firsts = lids.map(lid => store.remember(lid, phoneOf(lid), 's2'));
+      repo.upsert.mockRejectedValue(new Error('SQLITE_BUSY'));
+      await Promise.all(lids.map(lid => store.remember(lid, phoneOf(lid), 's2')));
+      const owedInFlight = owedChecks(store).size;
+      land.forEach(write => write());
+      await Promise.all(firsts);
+      await until(() => reports.length > 0);
+
+      expect(owedInFlight).toBe(0);
+      expect(reports).toEqual([expect.objectContaining({ phone: '628999', previousLid: '111', newLid: '222' })]);
+      expect(capLines(warn)).toEqual([]);
+      expect(owedChecks(store).size).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.LID_MAPPING_CACHE_MAX;
+      else process.env.LID_MAPPING_CACHE_MAX = saved;
+    }
+  });
+
   it('keeps at most its cap of owed checks and logs a drop at most once a minute, with a count', async () => {
     const { repo, store, warn } = await watched();
     let clock = 0;
@@ -2924,6 +2962,35 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
     return { read, fail };
   }
 
+  // The new number's write and the current number's check read fail in one database hiccup; the mapping cache then
+  // drops the lid and reads it back from the table at the number it was checked for.
+  it('checks a lid again when the cache reads it back to the number whose check read failed', async () => {
+    const saved = process.env.LID_MAPPING_CACHE_MAX;
+    process.env.LID_MAPPING_CACHE_MAX = '3';
+    try {
+      const { repo, store, reports } = await watched([{ lid: '333', phone: '628777', sessionId: 's1' }]);
+      const { read, fail } = holdPhoneReads(repo);
+
+      await store.remember('222', '628777', 's2'); // lands; its check's read is held open
+      await until(() => fail.length > 0);
+      repo.upsert.mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+      await expect(store.remember('222', '628111', 's2')).resolves.toBe(false);
+      fail[0](new Error('Connection terminated unexpectedly'));
+      repo.find.mockImplementation(read);
+      for (const lid of ['901', '902', '903']) await store.remember(lid, `62800${lid}`, 's2');
+      expect(store.getCached('222')).toBeUndefined(); // the miss reads the row back
+      await until(() => store.getCached('222') === '628777');
+      await expect(store.remember('222', '628777', 's2')).resolves.toBe(true);
+      await until(() => reports.length > 0);
+
+      expect(repo.rows.filter(row => row.phone === '628777').map(row => row.lid)).toEqual(['333', '222']);
+      expect(reports).toEqual([{ phone: '628777', previousLid: '333', newLid: '222', sessionId: 's2' }]);
+    } finally {
+      if (saved === undefined) delete process.env.LID_MAPPING_CACHE_MAX;
+      else process.env.LID_MAPPING_CACHE_MAX = saved;
+    }
+  });
+
   // The lid's holder changed number while its earlier check was read, and one database hiccup failed both
   // that read and the write of the new number.
   it('keeps a newer owed check of a lid over the one whose read failed', async () => {
@@ -2960,6 +3027,32 @@ describe('LidMappingStoreService: a phone reported under a second lid', () => {
     await settle();
 
     expect(reports).toEqual([{ phone: '628777', previousLid: '333', newLid: '222', sessionId: 's2' }]);
+  });
+
+  // A history and a contact sync report one new pairing together; the first write lands and its check's read fails
+  // while the second write still waits on the database.
+  it('checks a new lid when an overlapping write of it lands after its table read failed', async () => {
+    const { repo, store, reports } = await watched([{ lid: '111', phone: '628999', sessionId: 's1' }]);
+    const { read, fail } = holdPhoneReads(repo);
+    const upsert = repo.upsert.getMockImplementation() as (values: Partial<LidMapping>) => Promise<object>;
+    let land: () => void = () => undefined;
+
+    const first = store.remember('222', '628999', 's2'); // lands at once
+    repo.upsert.mockImplementationOnce(
+      (values: Partial<LidMapping>) => new Promise(resolve => (land = () => resolve(upsert(values)))),
+    );
+    const second = store.remember('222', '628999', 's2'); // the same pairing again, held open
+    await expect(first).resolves.toBe(true);
+    await until(() => fail.length > 0);
+    fail[0](new Error('connection reset'));
+    await until(() => owedChecks(store).has('222'));
+    repo.find.mockImplementation(read);
+    land();
+    await expect(second).resolves.toBe(true);
+    await until(() => reports.length > 0);
+
+    expect(reports).toEqual([{ phone: '628999', previousLid: '111', newLid: '222', sessionId: 's2' }]);
+    expect(owedChecks(store).size).toBe(0);
   });
 
   it('logs a failed read at most once a minute, with a count', async () => {
@@ -3162,6 +3255,48 @@ describe('LidMappingStoreService: second-lid checks on a real table', () => {
     await sync(store, [...earlier, ...singles, ...later], find);
 
     expect(pairsOf(reports)).toEqual(numbers);
+  });
+
+  // A PostgreSQL pool can commit two writes of one lid out of the order they were issued (one waits for a fresh
+  // connection while the other takes an idle one). Here the older write is issued once the newer has committed,
+  // and both return to the store after that, the newer first.
+  it('checks the newer number of a lid whose older write commits after it', async () => {
+    const { repo } = await storeOn();
+    await repo.insert([
+      { lid: '333', phone: '628777', isReported: true },
+      { lid: '444', phone: '628888', isReported: true },
+    ]);
+    const { store, reports, find } = await storeOn();
+    const upsert = repo.upsert.bind(repo);
+    let issueOlder: () => void = () => undefined;
+    let returnOlder: () => void = () => undefined;
+    const issued = new Promise<void>(resolve => (issueOlder = resolve));
+    const returned = new Promise<void>(resolve => (returnOlder = resolve));
+    let olderStored: Promise<unknown> = Promise.resolve();
+    jest
+      .spyOn(repo, 'upsert')
+      .mockImplementationOnce((entity, options) => {
+        const stored = issued.then(() => upsert(entity, options));
+        olderStored = stored;
+        return stored.then(result => returned.then(() => result));
+      })
+      .mockImplementationOnce(async (entity, options) => {
+        const result = await upsert(entity, options);
+        issueOlder();
+        await olderStored;
+        return result;
+      });
+
+    const older = store.remember('222', '628777', 's1');
+    await expect(store.remember('222', '628888', 's1')).resolves.toBe(true);
+    returnOlder();
+    await expect(older).resolves.toBe(true);
+    await sync(store, [], find);
+    expect((await repo.findOneBy({ lid: '222' }))?.phone).toBe('628777');
+
+    await sync(store, [['222', '628888']], find); // the next report of the number this node holds
+    expect((await repo.findOneBy({ lid: '222' }))?.phone).toBe('628888');
+    expect(pairsOf(reports)).toEqual(['628777:222|333', '628888:222|444']);
   });
 
   it('checks nothing when a sync replays pairs the mapping cache holds', async () => {

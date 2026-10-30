@@ -225,10 +225,10 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // POSTGRES_SCHEMA is optional (defaults to 'public' in configuration.ts). When set, validate it
     // is a legal, non-reserved Postgres identifier so a typo / injection-ish value fails fast at boot
     // rather than reaching CREATE TABLE "<schema>"."..." (or a search_path SET) at migration time.
-    // Lower case only: the search_path startup option is unquoted, so Postgres folds it to lower
-    // case, while TypeORM quotes the schema. A mixed-case name would split DDL and queries across
-    // two schemas. The raw value is checked, untrimmed: the app and the migration CLI both use it
-    // as set, so a padded (or whitespace-only) value must fail here as it fails in the CLI.
+    // Lower case only: the search_path the app sets with set_config on connect is unquoted, so Postgres
+    // folds it to lower case, while TypeORM quotes the schema. A mixed-case name would split DDL and
+    // queries across two schemas. The raw value is checked, untrimmed: the app and the migration CLI both
+    // use it as set, so a padded (or whitespace-only) value must fail here as it fails in the CLI.
     const pgSchema = config.POSTGRES_SCHEMA;
     const pgSchemaError = typeof pgSchema === 'string' && pgSchema !== '' ? postgresSchemaError(pgSchema) : null;
     if (pgSchemaError) {

@@ -1340,6 +1340,7 @@
       "installed": "ప్లగిన్ ఇన్‌స్టాల్ చేయబడింది",
       "installFailed": "ఇన్‌స్టాల్ విఫలమైంది",
       "uninstalled": "ప్లగిన్ అన్‌ఇన్‌స్టాల్ చేయబడింది",
+      "uninstalledWithWarning": "ప్లగిన్ అన్‌ఇన్‌స్టాల్ చేయబడింది, హెచ్చరికతో",
       "uninstallFailed": "అన్‌ఇన్‌స్టాల్ విఫలమైంది",
       "enableFailedTitle": "ప్రారంభించడం విఫలమైంది",
       "disableFailedTitle": "నిలిపివేయడం విఫలమైంది",

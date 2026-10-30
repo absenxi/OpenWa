@@ -98,11 +98,12 @@
 #       from the archive) before it copies anything, and restores there when the environment or ./.env
 #       sets that key; a default reached through the operator's link is still followed
 #   (av) a PostgreSQL POSTGRES_SCHEMA other than public, from the environment, ./.env or .env.generated, is
-#       dumped alone with its search extensions behind a prelude that drops none of them with CASCADE, for the
-#       DATABASE_URL branch too, and named in database.schema; public keeps the whole-database dump; a name the
-#       app refuses stops the backup before pg_dump; restore prints the schema load, with the extensions' owner
-#       and the way past another deployment's trigram index, only for a marked archive, in one transaction
-#       either way, and refuses a marker naming an invalid schema
+#       dumped alone with its search extensions, and pgcrypto only when it lives in that schema, behind a prelude
+#       that drops none of them with CASCADE, for the DATABASE_URL branch too, and named in database.schema; public
+#       keeps the whole-database dump; a name the app refuses, a pg_dump older than 14, or a failed pgcrypto probe
+#       stops the backup before it dumps anything; restore prints the schema load, with the extensions' owner and
+#       the way past another deployment's trigram index, only for a marked archive, in one transaction either way,
+#       and refuses a marker naming an invalid schema
 #
 # Usage: ./scripts/smoke-test-backup-restore.sh
 # Requires: bash, tar, node (restore.sh path resolution). sqlite3 is optional (see (c) and (k)).
@@ -2910,16 +2911,38 @@ mkdir -p "$AV/data" "$AV/bin"
 make_fixture "$AV/data/main.sqlite" "av-main"
 cat >"$AV/bin/pg_dump" <<EOF
 #!/bin/sh
+if [ "\$1" = --version ]; then
+  v="\${AV_PG_DUMP_VERSION:-17.6 (Debian 17.6-1.pgdg13+1)}"
+  # AV_PG_WRAPPER: Debian's pg_wrapper, which runs the local 13 cluster's client unless -h names a host, and the
+  # newest installed client, 17, when it does.
+  if [ -n "\${AV_PG_WRAPPER:-}" ]; then
+    v="13.23 (Debian 13.23-2.pgdg13+2)"
+    for a in "\$@"; do
+      if [ "\$a" = -h ]; then v="17.11 (Debian 17.11-1.pgdg13+1)"; fi
+    done
+  fi
+  echo "pg_dump (PostgreSQL) \$v"
+  exit 0
+fi
+# The schema-only probe for pgcrypto prints AV_PGCRYPTO, a CREATE EXTENSION line, when it is set.
+if [ "\$1" = --schema-only ]; then
+  printf '%s|' "\$@" >"$AV/pg_dump-probe-args"
+  [ -z "\${AV_PROBE_FAIL:-}" ] || exit 1
+  echo '-- probe'
+  [ -z "\${AV_PGCRYPTO:-}" ] || echo "\$AV_PGCRYPTO"
+  exit 0
+fi
 printf '%s|' "\$@" >"$AV/pg_dump-args"
 echo '-- dump'
 EOF
 chmod +x "$AV/bin/pg_dump"
 # backup_av <.env content> <.env.generated content> [VAR=value...]: run a backup, leaving pg_dump's arguments in
-# $AV/pg_dump-args and the archive in $AV/out; prints the exit status.
+# $AV/pg_dump-args (the pgcrypto probe's in $AV/pg_dump-probe-args) and the archive in $AV/out; prints the exit
+# status.
 backup_av() {
   printf '%b' "$1" >"$AV/.env"
   printf '%b' "$2" >"$AV/data/.env.generated"
-  rm -rf "$AV/out" "$AV/pg_dump-args"
+  rm -rf "$AV/out" "$AV/pg_dump-args" "$AV/pg_dump-probe-args"
   set +e
   OUT_AV="$(cd "$AV" && env "${@:3}" PATH="$AV/bin:$PATH" BACKUP_DIR="$AV/out" "$BACKUP" 2>&1)"
   local rc=$?
@@ -2938,6 +2961,10 @@ for AV_FROM in env dotenv generated; do
   if [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "$AV_SCOPED" ]; then
     fail "(av) POSTGRES_SCHEMA from $AV_FROM did not scope the dump: $(cat "$AV/pg_dump-args" 2>&1)"
   fi
+  if [ "$(cat "$AV/pg_dump-probe-args" 2>/dev/null || true)" != \
+    "--schema-only|-n|openwa_s|-e|plpgsql|-e|pgcrypto|-h|db|-p|5432|-U|app|shared|" ]; then
+    fail "(av) POSTGRES_SCHEMA from $AV_FROM did not probe its schema for pgcrypto: $(cat "$AV/pg_dump-probe-args" 2>&1)"
+  fi
 done
 ARCHIVE_AV="$AV/scoped.tar.gz"
 cp "$(ls "$AV"/out/openwa-backup-*.tar.gz)" "$ARCHIVE_AV"
@@ -2949,16 +2976,73 @@ if ! grep -q "ALTER SCHEMA %I RENAME TO %I', 'openwa_s'" <<<"$AV_SQL" || [ "$(ta
   fail "(av) the schema dump does not start with the prelude that moves the schema aside: $AV_SQL"
 fi
 # Another schema may use the extensions that move aside: the prelude drops them without CASCADE, so that use fails
-# the load instead of going with them, and drops the copy's own trigram index first.
+# the load instead of going with them, and drops the copy's own trigram index first. Without pgcrypto in the
+# schema it leaves pgcrypto alone.
 if grep -q CASCADE <<<"$AV_SQL" ||
-  ! grep -q "DROP INDEX IF EXISTS %I.%I', aside, 'idx_messages_body_trgm'" <<<"$AV_SQL"; then
+  ! grep -q "DROP INDEX IF EXISTS %I.%I', aside, 'idx_messages_body_trgm'" <<<"$AV_SQL" ||
+  ! grep -q "WHERE extname IN ('pg_trgm', 'unaccent') AND" <<<"$AV_SQL"; then
   fail "(av) the prelude drops the extensions with CASCADE, or not the copy's trigram index first: $AV_SQL"
 fi
 # The DATABASE_URL branch is scoped the same way.
 rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s DATABASE_URL=postgres://app@db/shared)"
 if [ "$rc" -ne 0 ] ||
-  [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-n|openwa_s|--no-comments|-e|plpgsql|-e|pg_trgm|-e|unaccent|postgres://app@db/shared|" ]; then
-  fail "(av) DATABASE_URL did not get the scoped dump (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+  [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-n|openwa_s|--no-comments|-e|plpgsql|-e|pg_trgm|-e|unaccent|postgres://app@db/shared|" ] ||
+  [ "$(cat "$AV/pg_dump-probe-args" 2>/dev/null || true)" != "--schema-only|-n|openwa_s|-e|plpgsql|-e|pgcrypto|postgres://app@db/shared|" ]; then
+  fail "(av) DATABASE_URL did not get the scoped dump (rc $rc): $(cat "$AV/pg_dump-args" "$AV/pg_dump-probe-args" 2>&1)"
+fi
+# On PostgreSQL 12 and older the migrations create pgcrypto in the schema for the id defaults: pg_dump's CREATE
+# EXTENSION line names the schema, quoted or not, and the dump and its prelude then carry pgcrypto, the prelude
+# dropping the copy's defaults that call it first. One in another schema stays out, as the app on 13 and newer
+# never uses it, and a probe that fails stops the backup before anything is archived.
+for AV_LINE in 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA openwa_s;' \
+  'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA "openwa_s";'; do
+  rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PGCRYPTO="$AV_LINE")"
+  AV_SQL="$(tar -xzOf "$(ls "$AV"/out/openwa-backup-*.tar.gz 2>/dev/null)" ./database.sql 2>/dev/null || true)"
+  if [ "$rc" -ne 0 ] ||
+    [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-n|openwa_s|--no-comments|-e|plpgsql|-e|pg_trgm|-e|unaccent|-e|pgcrypto|-h|db|-p|5432|-U|app|shared|" ] ||
+    ! grep -q "WHERE extname IN ('pg_trgm', 'unaccent', 'pgcrypto') AND" <<<"$AV_SQL" ||
+    ! grep -q "ALTER TABLE %I.%I ALTER COLUMN %I DROP DEFAULT', aside" <<<"$AV_SQL" || grep -q CASCADE <<<"$AV_SQL"; then
+    fail "(av) pgcrypto in the schema ($AV_LINE) did not reach the dump and its prelude (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+  fi
+done
+for AV_LINE in 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;' \
+  'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA openwa_s_old;'; do
+  rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PGCRYPTO="$AV_LINE")"
+  if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "$AV_SCOPED" ]; then
+    fail "(av) pgcrypto in another schema ($AV_LINE) reached the dump (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+  fi
+done
+backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PROBE_FAIL=1 >"$AV/rc"
+rc="$(cat "$AV/rc")"
+if [ "$rc" -eq 0 ] || [ -e "$AV/pg_dump-args" ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1; then
+  fail "(av) a failed pgcrypto probe did not stop the backup before the dump (rc $rc): $OUT_AV"
+fi
+# The scoped dump names its extensions with -e, which pg_dump has had since 14. An older client, or one whose
+# version cannot be read, stops the backup before it dumps or writes an archive, with a message naming 14; the
+# whole-database dump of public does not need it.
+for AV_OLD in 13.23 9.6.24 unknown; do
+  backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_DUMP_VERSION="$AV_OLD" >"$AV/rc"
+  rc="$(cat "$AV/rc")"
+  if [ "$rc" -eq 0 ] || [ -e "$AV/pg_dump-args" ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1 ||
+    ! grep -q 'needs pg_dump 14 or newer' <<<"$OUT_AV"; then
+    fail "(av) pg_dump $AV_OLD did not stop the scoped backup before the dump (rc $rc): $OUT_AV"
+  fi
+done
+# The version is the one the dump runs with: read with the dump's arguments, as pg_wrapper picks the client by them.
+# A host argument gets the newer client, which the dump then uses; a DATABASE_URL leaves the cluster's 13, refused.
+rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_WRAPPER=1)"
+if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "$AV_SCOPED" ]; then
+  fail "(av) the client pg_wrapper runs for the dump's host was not the one checked (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
+fi
+backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_PG_WRAPPER=1 DATABASE_URL=postgres://app@db/shared >"$AV/rc"
+rc="$(cat "$AV/rc")"
+if [ "$rc" -eq 0 ] || [ -e "$AV/pg_dump-args" ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1 ||
+  ! grep -q 'needs pg_dump 14 or newer' <<<"$OUT_AV" || ! grep -q 'reports: pg_dump (PostgreSQL) 13.23' <<<"$OUT_AV"; then
+  fail "(av) the cluster's pg_dump 13 under a DATABASE_URL did not stop the scoped backup (rc $rc): $OUT_AV"
+fi
+rc="$(backup_av '' "$AV_PG" AV_PG_DUMP_VERSION=13.23)"
+if [ "$rc" -ne 0 ] || [ "$(cat "$AV/pg_dump-args" 2>/dev/null || true)" != "-h|db|-p|5432|-U|app|shared|" ]; then
+  fail "(av) pg_dump 13 did not keep the whole-database dump of public (rc $rc): $(cat "$AV/pg_dump-args" 2>&1)"
 fi
 # public, spelled out or left to the default, keeps the whole-database dump and no marker.
 for AV_PUBLIC in 'POSTGRES_SCHEMA=public\n' 'POSTGRES_SCHEMA=\n' ''; do
@@ -2991,8 +3075,10 @@ if ! grep -q 'dump of schema openwa_s (POSTGRES_SCHEMA) present' <<<"$OUT_AV" ||
   fail "(av) restore did not print the schema load for a marked archive: $OUT_AV"
 fi
 # Dropping extensions that live in the schema takes their owner, and another OpenWA deployment's trigram index on
-# them refuses the load until that index is dropped: the printed text names both.
+# them refuses the load until that index is dropped: the printed text names both, and pgcrypto, which the dump
+# carries only when it lived in the schema.
 if ! grep -q 'when pg_trgm and unaccent live in that schema, owns them' <<<"$OUT_AV" ||
+  ! grep -q 'dump carries it, which it does only when pgcrypto lived in that schema' <<<"$OUT_AV" ||
   ! grep -q 'drop that index and load again' <<<"$OUT_AV"; then
   fail "(av) restore did not name the extensions' owner or the way past another deployment's trigram index: $OUT_AV"
 fi

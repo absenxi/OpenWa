@@ -118,8 +118,9 @@ function partialTree(err) {
 /**
  * True only when the tree provably carries nothing this patcher writes: no REQUIRED_SITES marker and no
  * patch artifact. An applier that failed before its first write (a tree the user cannot write) leaves
- * exactly that, while one that failed part-way leaves a marker or an artifact behind. Anything that cannot
- * be read proves nothing, so it answers false.
+ * exactly that, while one that failed part-way leaves a marker or an artifact behind, or a file missing:
+ * `git apply` deletes the files it rewrites, where it can, before writing any of them back. Anything that
+ * cannot be read proves nothing, so it answers false.
  */
 function treeUntouched(wwjsDir) {
   try {
@@ -222,8 +223,9 @@ function applyWithGit(wwjsDir, patchFile) {
     // Degrade only when nothing can have been written: ENOENT means git never executed at all, and a
     // 128 whose message is one of git's pre-write refusals means it rejected the input before applying
     // anything. Any other failure — including a 128 raised midway through writing results — has to be
-    // treated as a partial tree. A rejected hunk is exit 1, which returned above.
-    throw gitApplyLeftTreeUntouched(e) ? err : partialTree(err);
+    // treated as a partial tree, unless the tree provably kept nothing of this run: a tree the user cannot
+    // write fails git at its first file, as it does `patch`. A rejected hunk is exit 1, which returned above.
+    throw gitApplyLeftTreeUntouched(e) || treeUntouched(wwjsDir) ? err : partialTree(err);
   }
 }
 

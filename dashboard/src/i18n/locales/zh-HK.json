@@ -1340,6 +1340,7 @@
       "installed": "外掛已安裝",
       "installFailed": "安裝失敗",
       "uninstalled": "外掛已解除安裝",
+      "uninstalledWithWarning": "外掛已解除安裝，但有警告",
       "uninstallFailed": "解除安裝失敗",
       "enableFailedTitle": "啟用失敗",
       "disableFailedTitle": "停用失敗",

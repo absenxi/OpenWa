@@ -148,7 +148,8 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
    * can evict the entry inside that same window, leaving it indistinguishable from never-learned.
    * Counted per lid, so the first of two overlapping writes settling does not clear the second. The
    * latest actual report's token remains until all older writes settle, isolating their late results.
-   * It also holds the second-lid check the latest new pairing in flight owes, for a report overlapping it.
+   * It also holds the second-lid check the latest new pairing owes until a landed write queues it, for a report
+   * overlapping it.
    */
   private readonly unsettledWrites = new Map<
     string,
@@ -178,8 +179,8 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
   private readonly writeWarning = { at: -Infinity, held: 0 };
   /**
    * Second-lid checks owed after the writes of the report that owed one failed, or its read did, until a write of
-   * that phone lands. A new check stays on its lid's {@link unsettledWrites} entry while its write is in flight.
-   * Kept apart from the mapping cache and its eviction.
+   * that phone lands. A new check stays on its lid's {@link unsettledWrites} entry until a landed write queues it or
+   * every write of the lid has settled. Kept apart from the mapping cache and its eviction.
    */
   private readonly secondLidOwed = new Map<string, SecondLidCheck>();
   private readonly secondLidDropWarning = { at: -Infinity, held: 0 };
@@ -444,11 +445,12 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       (phone === null || !sessionId || this.seenBy.get(lid)?.has(sessionId));
     // This report gives the lid a phone this node did not hold for it, a new or changed pairing or one only
     // display data had, so it owes a second-lid check; a lid outside the cache cannot be told from a new one.
-    // Any other report carries the check an earlier report of the lid still owes, in flight or not.
-    const gaining = phone !== null && (cached !== phone || this.unreported.has(lid));
-    const owed = gaining
-      ? { phone, sessionId: sessionId ?? null, queued: false }
-      : (this.unsettledWrites.get(lid)?.check ?? this.secondLidOwed.get(lid));
+    // Any other report carries the check an earlier report of the lid still owes, in flight or not, unless that
+    // check names another phone (the cache read this one back from the table since): then it owes its own.
+    const earlier = this.unsettledWrites.get(lid)?.check ?? this.secondLidOwed.get(lid);
+    const gaining =
+      phone !== null && (cached !== phone || this.unreported.has(lid) || (!!earlier && earlier.phone !== phone));
+    const owed = gaining ? { phone, sessionId: sessionId ?? null, queued: false } : earlier;
     // A negative is not cached until the table has taken it: see clear().
     if (!seen && phone !== null) this.index(lid, phone, null);
     if (phone !== null) this.failedWrites.add(lid);
@@ -456,7 +458,7 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     const report = { phone };
     const writing = this.beginWrite(lid, report, true);
     if (gaining) {
-      writing.check = owed; // while in flight; the cap counts only checks no write holds
+      writing.check = owed; // outside the cap of owed checks while the lid's writes are unsettled
       this.secondLidOwed.delete(lid);
     }
     try {
@@ -506,7 +508,11 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
         }
         if (sessionId && this.seenBy.get(lid) === reporters) reporters.add(sessionId);
       }
+      // A check owed again after its read failed is a copy no write already in flight carries. The lid's latest report
+      // takes it when it lands with that phone; an older one could run it before a newer write moves the row.
+      const again = writing.latestReport === report ? this.secondLidOwed.get(lid) : undefined;
       if (owed && owed.phone === phone) this.queueSecondLid(lid, owed);
+      if (again?.phone === phone) this.queueSecondLid(lid, again);
       return true;
     } catch (err) {
       this.warnWriteFailed(
@@ -514,12 +520,7 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       );
       return false;
     } finally {
-      // Owed until a write of its phone lands, unless a newer report of the lid took its place. A negative
-      // overlapping the write can settle first; that write still queues the check if it lands.
-      if (owed && writing.check === owed) {
-        writing.check = undefined;
-        if (!owed.queued) this.oweSecondLid(lid, owed);
-      }
+      if (owed?.queued && writing.check === owed) writing.check = undefined; // a landed write queued it
       this.endWrite(lid, writing);
     }
   }
@@ -535,8 +536,16 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     return writing;
   }
 
-  private endWrite(lid: string, writing: { count: number }): void {
-    if (this.unsettledWrites.get(lid) === writing && --writing.count === 0) this.unsettledWrites.delete(lid);
+  /**
+   * Once the last write of the lid settles, the latest new pairing's check, if no landed write queued it, is owed
+   * until a write of its phone lands, unless a newer report of the lid took its place. Not before: an overlapping
+   * report or negative can fail while the pairing's own write is still in flight, and that write queues the check if
+   * it lands.
+   */
+  private endWrite(lid: string, writing: { count: number; check?: SecondLidCheck }): void {
+    if (this.unsettledWrites.get(lid) !== writing || --writing.count > 0) return;
+    this.unsettledWrites.delete(lid);
+    if (writing.check && !writing.check.queued) this.oweSecondLid(lid, writing.check);
   }
 
   /**
@@ -597,7 +606,10 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
     this.secondLidListener = listener;
   }
 
-  /** Keep a check owed, dropping the oldest past {@link SECOND_LID_OWED_MAX}: a dropped check is not run. */
+  /**
+   * Keep a check owed, dropping the oldest past {@link SECOND_LID_OWED_MAX}: a dropped check runs only if a report
+   * in flight already carries it.
+   */
   private oweSecondLid(lid: string, check: SecondLidCheck): void {
     if (setNewest(this.secondLidOwed, lid, check, SECOND_LID_OWED_MAX)) {
       const message = `More than ${SECOND_LID_OWED_MAX} second-lid checks are owed; dropping the oldest`;
@@ -663,7 +675,15 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       const queued = [...lids.keys()];
       const held = found[phone] ?? [];
       queued.forEach((newLid, i) => {
-        if (!held.includes(newLid)) return; // its row holds another phone by now
+        if (!held.includes(newLid)) {
+          // Its row holds another phone by now. If this node still holds this one for it, the row is another node's or
+          // an older write that committed last (a pool can reorder commits): the next write of this phone to land
+          // checks it again.
+          const check = lids.get(newLid);
+          if (check && this.lidToPhone.get(newLid) === phone && !this.secondLidOwed.has(newLid))
+            this.oweSecondLid(newLid, { ...check, queued: false });
+          return;
+        }
         for (const previousLid of held) {
           // Itself, or a lid whose write landed later in this window and names this one previous.
           if (queued.indexOf(previousLid) >= i || !this.firstReport(phone, previousLid, newLid)) continue;

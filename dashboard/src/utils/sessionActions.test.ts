@@ -184,7 +184,7 @@ test('classifyUnlinkError: a JSON 502 WITHOUT the exact code stays generic', () 
 });
 
 test('classifyUnlinkError: a 409 says there was nothing to unlink', () => {
-  const err = new Error('This session was never linked to WhatsApp, so there is nothing to unlink.') as Error & {
+  const err = new Error('This session has no linked WhatsApp device, so there is nothing to unlink.') as Error & {
     status?: number;
     code?: string;
   };

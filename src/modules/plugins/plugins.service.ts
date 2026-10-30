@@ -22,6 +22,7 @@ import type { PluginConfigSchema } from '../../core/plugins';
 import { PluginDto } from './dto/plugin.dto';
 import { redactSecretConfig, restoreSecretConfig } from './redact-config';
 import { restorableConfig } from '../../core/plugins/plugin-activation';
+import { PluginUninstallingError } from '../../core/plugins/plugin-uninstaller';
 import { parsePluginPackage } from './plugin-installer';
 import { assertDownloadSha256, assertPluginInstallUrl, fetchSafeBuffer } from './plugin-download';
 import { annotateCatalog, CatalogEntry, CatalogPlugin, isCatalogEntry } from './catalog';
@@ -243,6 +244,7 @@ export class PluginsService {
       this.pluginLoader.setPluginSessions(id, sessions, { mustPersist: true });
     } catch (error) {
       if (error instanceof PluginRegistryWriteError) throw new InternalServerErrorException(error.message);
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       throw new BadRequestException(error instanceof Error ? error.message : String(error));
     }
     return this.findOne(id);
@@ -264,6 +266,7 @@ export class PluginsService {
       this.pluginLoader.updatePluginConfig(id, merged, { mustPersist: true });
       return { success: true, message: `Plugin ${id} configuration updated` };
     } catch (error) {
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       return {
         success: false,
         message: error instanceof Error ? error.message : String(error),
@@ -301,6 +304,7 @@ export class PluginsService {
       this.pluginLoader.setPluginSessionConfig(id, sessionId, merged, { mustPersist: true });
       return { success: true, message: `Plugin ${id} configuration for session ${sessionId} updated` };
     } catch (error) {
+      if (error instanceof PluginUninstallingError) throw new ConflictException(error.message);
       return {
         success: false,
         message: error instanceof Error ? error.message : String(error),
@@ -731,19 +735,25 @@ export class PluginsService {
     try {
       const { registryEntryKept } = await this.pluginLoader.uninstallPlugin(id);
       if (registryEntryKept) {
+        // The plugin has no card left on the Plugins page, so the answer names the call that removes the entry.
         return {
           success: true,
           message:
             `Plugin ${id} uninstalled, but the plugin registry could not be written: registry.json keeps its entry, ` +
             'emptied of config, sessions and the enable decision, reported at startup as a plugin with no code ' +
-            'until the uninstall is repeated',
+            `until DELETE /api/plugins/${id} is repeated once the registry is writable`,
         };
       }
       return { success: true, message: `Plugin ${id} uninstalled successfully` };
     } catch (error) {
       // Raised only by the write that empties the entry, before anything is removed, so nothing was applied.
       if (error instanceof PluginRegistryWriteError) throw new InternalServerErrorException(error.message);
-      throw new BadRequestException(error instanceof Error ? error.message : String(error));
+      // The cause tells the controller whether the failure came after the entry was emptied (it audits that one).
+      // With options, Nest drops the body's `error` field unless the description is passed too.
+      throw new BadRequestException(error instanceof Error ? error.message : String(error), {
+        cause: error,
+        description: 'Bad Request',
+      });
     }
   }
 

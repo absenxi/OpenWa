@@ -1056,14 +1056,19 @@ export class BaileysLifecycle {
       // at all when creds.me is unset, so a resolved promise proves nothing about the unlink. Use
       // the public query() surface against the pinned `remove-companion-device` node instead.
       const b = await this.loadLib();
-      const jid = sourceSock.user?.id;
-      if (!jid) {
-        // No creds.me: this socket never linked, so WhatsApp lists no device to remove and the 502 that
-        // reports the unlink as incomplete would send the operator back to retry it forever. Unless the
-        // auth dir holds credentials moved aside as unreadable, whose device may well still be linked.
+      // The live credentials, not sock.user: that is a copy of creds.me made when the socket was built, still
+      // unset on a socket that has just paired and is waiting for its restart.
+      const jid = sourceSock.authState?.creds?.me?.id;
+      // creds.me alone names no device: a pairing-code request writes it before the code is entered, and only
+      // a completed link writes creds.account, which every linked session holds (Baileys attaches it to
+      // each prekey message).
+      if (!jid || !sourceSock.authState?.creds?.account) {
+        // No linked device, so WhatsApp lists none to remove and the 502 that reports the unlink as
+        // incomplete would send the operator back to retry it forever. Unless the auth dir holds credentials
+        // moved aside as unreadable, whose device may well still be linked.
         if (!(await this.keepsQuarantinedCredentials())) {
           throw new EngineNotReadyError(
-            'This session was never linked to WhatsApp, so there is nothing to unlink. It was stopped; start it to link a device, or delete it.',
+            'This session has no linked WhatsApp device, so there is nothing to unlink. It was stopped; start it to link a device, or delete it.',
           );
         }
         // The companion identity is required to address the unlink; without it nothing is sent.
@@ -1106,7 +1111,7 @@ export class BaileysLifecycle {
   /**
    * Whether the auth dir keeps credentials the auth store moved aside because creds.json could not be
    * parsed (`corrupt-*`, see useAtomicMultiFileAuthState). The device they belong to may still be linked.
-   * A dir that cannot be listed is answered yes: nothing then proves the session never linked.
+   * A dir that cannot be listed is answered yes: nothing then proves the session has no linked device.
    */
   private async keepsQuarantinedCredentials(): Promise<boolean> {
     try {

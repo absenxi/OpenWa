@@ -38,7 +38,13 @@ class FakeSock extends EventEmitter {
     },
   };
   public emitter = new EventEmitter();
-  public user: { id: string; lid?: string; name?: string } | undefined;
+  // Baileys builds sock.user from creds.me, which logout() reads live: a fake set up as linked has both.
+  get user(): { id: string; lid?: string; name?: string } | undefined {
+    return this.authState.creds.me;
+  }
+  set user(user: { id: string; lid?: string; name?: string } | undefined) {
+    this.authState.creds.me = user;
+  }
   // Baileys' WebSocketClient; the lifecycle reads isOpen after an await to detect a drop in between,
   // and listens on it for an upgrade response that never became a WebSocket.
   public ws = Object.assign(new EventEmitter(), { isOpen: true, isConnecting: false });
@@ -102,7 +108,12 @@ class FakeSock extends EventEmitter {
   public resyncAppState = jest.fn().mockResolvedValue(undefined);
   public waUploadToServer = jest.fn();
   public authState = {
-    creds: { accountSyncCounter: 0 },
+    // A linked device's signed identity; a socket without it has no device to unlink.
+    creds: {
+      accountSyncCounter: 0,
+      account: {},
+      me: undefined as { id: string; lid?: string; name?: string } | undefined,
+    },
     keys: { set: jest.fn().mockResolvedValue(undefined) },
   };
   public signalRepository: { lidMapping: { getLIDForPN: jest.Mock; getPNForLID?: jest.Mock } } | undefined;
@@ -666,7 +677,7 @@ describe('BaileysAdapter lifecycle & status', () => {
   it('logout() with missing companion identity rejects, sends nothing, preserves auth, and stops locally', async () => {
     // No creds.me.id → the unlink cannot be addressed. The promise must reject, query()/rm() must NOT
     // run, and the live socket must be torn down locally so no engine orphan remains. With no
-    // quarantined credentials in the auth dir the session never linked, which is not an unlink left
+    // quarantined credentials in the auth dir the session has no linked device, which is not an unlink left
     // incomplete (409, not 502).
     const rmSpy = jest.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
     try {

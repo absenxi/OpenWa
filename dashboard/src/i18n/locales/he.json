@@ -1359,6 +1359,7 @@
       "installed": "התוסף הותקן",
       "installFailed": "ההתקנה נכשלה",
       "uninstalled": "התוסף הוסר",
+      "uninstalledWithWarning": "התוסף הוסר, עם אזהרה",
       "uninstallFailed": "ההסרה נכשלה",
       "enableFailedTitle": "ההפעלה נכשלה",
       "disableFailedTitle": "ההשבתה נכשלה",

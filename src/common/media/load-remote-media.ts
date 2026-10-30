@@ -1,5 +1,5 @@
 import { BadRequestException, HttpException, PayloadTooLargeException } from '@nestjs/common';
-import { EngineNotSentError } from '../errors/engine-not-sent.error';
+import { EngineNotSentError, markNothingSent } from '../errors/engine-not-sent.error';
 import { SsrfBlockedError, withSafeFetch } from '../security/ssrf-guard';
 import { urlFetchProxy } from '../security/proxy-dispatcher';
 import { createLogger } from '../services/logger.service';
@@ -41,7 +41,8 @@ export const LINK_PREVIEW_THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024;
  * caller's URL for an operator's proxy outage would send the client to fix a link that works. Once a
  * response has arrived the target was reached, and its failures stay 400/413. The 503 is an
  * `EngineNotSentError`: the fetch runs before WhatsApp is asked, so a paced send gives its admission
- * back.
+ * back. For the same reason every 400 and 413 here, and the SSRF block, carries `markNothingSent`: a keyed
+ * send frees its `Idempotency-Key` for them, as it does for the 503.
  *
  * `sessionProxyUrl` is the egress proxy of the session the fetch is attributed to, or undefined for
  * a direct one. It is required rather than optional so a new call site cannot leave a proxied
@@ -105,7 +106,7 @@ export async function loadRemoteMediaBuffer(
     },
     { proxyUrl },
   ).catch((error: unknown) => {
-    if (error instanceof HttpException || error instanceof SsrfBlockedError) throw error;
+    if (error instanceof HttpException || error instanceof SsrfBlockedError) throw markNothingSent(error);
     // Matched by name: the abort reason is a DOMException, which need not share this realm's Error.
     const name = (error as { name?: unknown } | null)?.name;
     const proxyHop = proxyUrl !== undefined && !responded;
@@ -113,7 +114,7 @@ export async function loadRemoteMediaBuffer(
       if (proxyHop) {
         throw new EngineNotSentError(`Media fetch through the session proxy timed out after ${timeoutMs} ms`);
       }
-      throw new BadRequestException(`Media fetch timed out after ${timeoutMs} ms`);
+      throw markNothingSent(new BadRequestException(`Media fetch timed out after ${timeoutMs} ms`));
     }
     // undici reports a failed connection as TypeError('fetch failed') and a body cut off mid-read
     // as TypeError('terminated'). Their cause can name the resolved address or the proxy, so it is
@@ -123,7 +124,7 @@ export async function loadRemoteMediaBuffer(
       const cause: unknown = error.cause;
       logger.warn('Media fetch failed', { cause: cause instanceof Error ? cause.message : error.message });
       if (proxyHop) throw new EngineNotSentError('Media fetch through the session proxy failed');
-      throw new BadRequestException('Media fetch failed');
+      throw markNothingSent(new BadRequestException('Media fetch failed'));
     }
     throw error;
   });

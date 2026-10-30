@@ -8,9 +8,10 @@ import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
 /**
  * WhatsApp Web's socket answers CONNECTED again after a page reload whether or not whatsapp-web.js managed to
  * re-inject into the new page, and the library's re-emitted 'ready' can come from a run that started in the
- * previous document. So while a reload of a ready page is unverified the liveness probe also asks the page for
- * whatsapp-web.js's helpers. It never answers dead inside the reload grace, nor for a reload that is merely
- * slow: only once the helpers stayed missing past the episode cap.
+ * previous document. So while a reload of a ready page is unverified the liveness probe, and every 'ready', also asks
+ * the page for whatsapp-web.js's helpers. It never answers dead for a reload that is merely slow, inside its grace or
+ * after it: only once the helpers stayed missing past the episode cap, counted from the first reload after the page
+ * was last found re-injected, or re-emitted 'ready' well after its own reload.
  */
 describe('liveness of a ready page after a reload', () => {
   type Page = EventEmitter & { evaluate: jest.Mock };
@@ -108,7 +109,8 @@ describe('liveness of a ready page after a reload', () => {
     client.pupPage.evaluate.mockResolvedValue(false);
     await expect(adapter.probeLiveness()).resolves.toBe(true);
 
-    expect(client.pupPage.evaluate).toHaveBeenCalledTimes(1);
+    // Once by the 'ready' itself and once by the probe that started before that read answered; never after.
+    expect(client.pupPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
   it('never answers dead inside the reload grace while the helpers are still missing', async () => {
@@ -316,6 +318,111 @@ describe('liveness of a ready page after a reload', () => {
     expect(client.pupPage.evaluate).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * A page that reloads at each of `reloads` (ms from now). A reload destroys whatsapp-web.js's helpers, and only that
+   * page's own re-inject, `reinjectAfter` ms later, brings them back and re-emits 'ready'. With `previousPageReady`, a
+   * 'ready' also arrives 1 s after each reload, from a run that read the page before it.
+   */
+  const reloadingPage = (
+    client: FakeClient,
+    reloads: number[],
+    reinjectAfter: number[],
+    { late = false, previousPageReady = false }: { late?: boolean; previousPageReady?: boolean } = {},
+  ): void => {
+    let page = 0;
+    let helpers = true;
+    client.getState.mockImplementation(() => delayed(WAState.CONNECTED, late ? 7_000 : 1_000));
+    client.pupPage.evaluate.mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve(helpers), late ? 5_000 : 1_000)),
+    );
+    reloads.forEach((at, i) => {
+      setTimeout(() => {
+        page = i + 1;
+        helpers = false;
+        reload(client);
+      }, at);
+      if (previousPageReady) setTimeout(() => client.emit('ready'), at + 1_000);
+      setTimeout(() => {
+        if (page === i + 1) helpers = true;
+        client.emit('ready');
+      }, at + reinjectAfter[i]);
+    });
+  };
+
+  // A slow re-inject (170 s, under the cap) is followed 5 s later by a second reload, before any probe saw the helpers.
+  // The second page re-injects 100 s after its own reload. Every page re-injected, so the second reload begins an
+  // episode of its own: inheriting the first one's anchor read it dead inside its own grace and recycled the session.
+  it.each([
+    ['in budget', false, false],
+    ['late', true, false],
+    ['in budget, with a ready from the previous page after each reload', false, true],
+    ['late, with a ready from the previous page after each reload', true, true],
+  ])(
+    'keeps a page alive whose second reload follows a slow re-inject (%s)',
+    async (_label, late, previousPageReady) => {
+      const { adapter, client } = wire();
+      reloadingPage(client, [0, 175_000], [170_000, 100_000], { late, previousPageReady });
+
+      const answers = await watchdogAnswers(adapter, 6, { firstProbeAt: 60_000 });
+
+      expect(answers).toEqual([true, true, true, true, true, true]);
+    },
+  );
+
+  // A 'ready' that comes moments after a reload is no sign that the reloaded page re-injected: a page that keeps
+  // reloading and never does is still recycled once its first reload is past the cap.
+  it.each([
+    ['in budget', false],
+    ['late', true],
+  ])(
+    'recycles a navigation loop that never re-injects although a ready follows each reload (%s)',
+    async (_label, late) => {
+      const { adapter, client } = wire();
+      client.getState.mockImplementation(() => delayed(WAState.CONNECTED, late ? 7_000 : 1_000));
+      client.pupPage.evaluate.mockImplementation(() => delayed(false, late ? 5_000 : 1_000));
+      client.pupPage.on('framenavigated', () => setTimeout(() => client.emit('ready'), 1_000));
+      reload(client);
+
+      const answers = await watchdogAnswers(adapter, 9, { loop: client });
+
+      expect(recycled(answers)).toBe(true);
+    },
+  );
+
+  // A fast host re-injects 3 or 4.5 s after each reload, too soon to be trusted on its delay, and the page reloads in
+  // step with the watchdog, so each probe's helpers read lands just after a reload, before the helpers are back. The
+  // 'ready' of each re-inject asks the page itself, finds the helpers, and the session is kept.
+  it.each([
+    ['every 60 s, re-injected 3 s after each reload', 60_000, 3_000],
+    ['every 60 s, re-injected 4.5 s after each reload', 60_000, 4_500],
+    ['every 30 s, re-injected 4.5 s after each reload', 30_000, 4_500],
+  ])('keeps a page alive that keeps reloading and re-injects fast (%s)', async (_label, period, reinject) => {
+    const { adapter, client } = wire();
+    const reloads = Array.from({ length: Math.ceil(400_000 / period) }, (_, i) => 1_500 + i * period);
+    const reinjects = reloads.map(() => reinject);
+    reloadingPage(client, reloads, reinjects);
+
+    const answers = await watchdogAnswers(adapter, 6, { firstProbeAt: 60_000 });
+
+    expect(answers).toEqual([true, true, true, true, true, true]);
+  });
+
+  // The helpers read a 'ready' starts answers for the page it reached. One that answers only after a later reload
+  // landed may have read the page before it, so it verifies nothing: that later page never re-injects and is recycled.
+  it('does not let a helpers read that a reload overtook verify the page that reload loaded', async () => {
+    const { adapter, client } = wire();
+    reload(client);
+    client.pupPage.evaluate.mockReturnValueOnce(delayed(true, 2_000));
+    client.emit('ready');
+    await jest.advanceTimersByTimeAsync(1_000);
+    reload(client);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    client.pupPage.evaluate.mockReset().mockResolvedValue(false);
+    later(NAVIGATION_EPISODE_CAP_MS);
+    await expect(adapter.probeLiveness()).resolves.toBe(false);
+  });
+
   it('does not ask the page when no reload is pending', async () => {
     const { adapter, client } = wire();
 
@@ -366,6 +473,75 @@ describe('a re-inject that throws in a reloaded page', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('re-inject'),
       expect.objectContaining({ sessionId: 'sess-reinject', action: 'page_reinject_failed', error: 'ready timeout' }),
+    );
+  });
+
+  type WrappedClient = Client & { inject: () => Promise<void> };
+
+  // The library re-injects on every navigation, also on the ones a teardown brings: the in-page unlink of our own
+  // logout navigates while the logout is still awaited, and an unlink WhatsApp reports navigates to the QR page. A
+  // re-inject that dies then is that teardown at work, not a reloaded page heading for a recycle.
+  it.each<[string, (adapter: WhatsAppWebJsAdapter, client: WrappedClient) => Promise<void>]>([
+    [
+      'our own logout',
+      async adapter => {
+        const logout = jest
+          .spyOn(Client.prototype as unknown as { logout: () => Promise<void> }, 'logout')
+          .mockImplementation(function (this: WrappedClient) {
+            return this.inject();
+          });
+        try {
+          await adapter.logout();
+        } finally {
+          logout.mockRestore();
+        }
+      },
+    ],
+    [
+      'a stop that already let go of the client',
+      async (adapter, client) => {
+        const destroy = jest
+          .spyOn(Client.prototype as unknown as { destroy: () => Promise<void> }, 'destroy')
+          .mockResolvedValue(undefined);
+        try {
+          await adapter.disconnect();
+        } finally {
+          destroy.mockRestore();
+        }
+        await client.inject();
+      },
+    ],
+    [
+      'an unlink WhatsApp reported',
+      async (_adapter, client) => {
+        client.emit('disconnected', 'LOGOUT');
+        await client.inject();
+      },
+    ],
+    [
+      // The stuck-auth recovery drops the client with no teardown flag set, before the session reports anything.
+      'a recovery that let go of the client',
+      async (adapter, client) => {
+        (adapter as unknown as { client: unknown }).client = null;
+        await client.inject();
+      },
+    ],
+  ])('is not logged when it dies under %s', async (_label, teardown) => {
+    const adapter = new WhatsAppWebJsAdapter({
+      sessionId: 'sess-reinject',
+      sessionDataPath: './data/sessions',
+      puppeteer: {},
+    });
+    const warn = jest.spyOn((adapter as unknown as { logger: { warn: () => void } }).logger, 'warn');
+    await adapter.initialize({});
+    const client = (adapter as unknown as { client: WrappedClient }).client;
+
+    await teardown(adapter, client);
+
+    expect(injectSpy).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'page_reinject_failed' }),
     );
   });
 });

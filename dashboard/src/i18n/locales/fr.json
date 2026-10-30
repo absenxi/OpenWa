@@ -1349,6 +1349,7 @@
       "installed": "Plugin installé",
       "installFailed": "Échec de l'installation",
       "uninstalled": "Plugin désinstallé",
+      "uninstalledWithWarning": "Plugin désinstallé, avec un avertissement",
       "uninstallFailed": "Échec de la désinstallation",
       "enableFailedTitle": "Échec de l'activation",
       "disableFailedTitle": "Échec de la désactivation",

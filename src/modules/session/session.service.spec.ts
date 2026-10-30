@@ -651,13 +651,13 @@ describe('SessionService', () => {
       expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', { phone: null });
     });
 
-    // A session that never linked has no device to remove: its engine refuses the logout as not ready, and
+    // A session with no linked device has nothing to remove: its engine refuses the logout as not ready, and
     // that refusal answers instead of the 502, whose advice to start the session and retry would only repeat.
-    it('logout() answers the 409 of a session that never linked, after the same local teardown', async () => {
+    it('logout() answers the 409 of a session with no linked device, after the same local teardown', async () => {
       (repository.findOne as jest.Mock).mockResolvedValue(createMockSession());
       (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
       const refusal = new EngineNotReadyError(
-        'This session was never linked to WhatsApp, so there is nothing to unlink.',
+        'This session has no linked WhatsApp device, so there is nothing to unlink.',
       );
       const engine = { logout: jest.fn().mockRejectedValue(refusal) };
       enginesOf().set('sess-uuid-1', engine);

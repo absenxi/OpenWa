@@ -658,7 +658,7 @@ export function Sessions() {
         const msg = err instanceof Error && err.message ? err.message : t('sessions.unlink.incomplete');
         toast.warning(t('sessions.unlink.incompleteTitle'), msg);
       } else if (kind === 'notLinked') {
-        // 409: the session never linked, so there was nothing to unlink. The gateway's message says it was
+        // 409: the session has no linked device, so there was nothing to unlink. The gateway's message says it was
         // stopped and to start or delete it instead.
         toast.error(t('sessions.unlink.failedTitle'), err instanceof Error ? err.message : t('sessions.unlink.failed'));
       } else {

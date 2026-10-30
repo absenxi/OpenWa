@@ -104,6 +104,7 @@ const ChatListRow = memo(
     formatChatTime,
     onSelectChat,
     rowActions,
+    menuOpen,
     onMenuOpenChange,
   }: ChatListRowProps) {
     const { t } = useTranslation();
@@ -177,7 +178,7 @@ const ChatListRow = memo(
     return (
       <div className="chat-item-wrap has-menu">
         {card}
-        <ChatRowMenu chat={chat} actions={rowActions} onOpenChange={onOpenChange} />
+        <ChatRowMenu chat={chat} actions={rowActions} open={menuOpen} onOpenChange={onOpenChange} />
       </div>
     );
   },
@@ -220,7 +221,7 @@ function ChatSidebar({
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // The row whose menu is open, the one row drawn again for every change of the page's actions (see ChatListRow).
+  // The one row whose menu is open (opening another closes it), drawn again as the page's actions change.
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
   const onMenuOpenChange = useCallback(
     (chatId: string, open: boolean) => setMenuChatId(current => (open ? chatId : current === chatId ? null : current)),

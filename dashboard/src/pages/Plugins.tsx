@@ -854,10 +854,19 @@ export default function Plugins() {
     if (!window.confirm(t('plugins.uninstallConfirm', { name: localizePlugin(plugin, i18n.language).name }))) return;
     startAction(plugin.id);
     try {
-      await pluginsApi.uninstall(plugin.id);
+      const res = await pluginsApi.uninstall(plugin.id);
       refetchAll();
       void loadCatalog();
-      toast.success(t('plugins.toasts.uninstalled', 'Plugin uninstalled'), localizePlugin(plugin, i18n.language).name);
+      // The server ships with this page, so any answer but its plain one reports work left behind (a registry entry
+      // the uninstall could not drop), and with the card gone the answer is all that is left to say so.
+      if (res.message === `Plugin ${plugin.id} uninstalled successfully`) {
+        toast.success(
+          t('plugins.toasts.uninstalled', 'Plugin uninstalled'),
+          localizePlugin(plugin, i18n.language).name,
+        );
+      } else {
+        toast.warning(t('plugins.toasts.uninstalledWithWarning'), res.message);
+      }
     } catch (err) {
       toast.error(t('plugins.toasts.uninstallFailed', 'Uninstall failed'), err instanceof Error ? err.message : '');
     } finally {

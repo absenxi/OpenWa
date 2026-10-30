@@ -748,10 +748,11 @@ logout. Do not assume the retry reconnects automatically or lands in a guarantee
 the old credentials remain usable depends on where the failure happened, and the route does not
 report which.
 
-On Baileys, a session that never linked (no companion identity, and no unreadable credentials the
-engine moved aside, whose device may still be linked) has nothing to unlink: it is torn down locally
-the same way, `phone` is cleared, no `session_logged_out` audit row is written, and the route returns
-`409`. Start the session to link a device, or delete it; retrying the logout cannot change that.
+On Baileys, a session with no linked device has nothing to unlink: it never linked, its pairing code
+was never entered, or the phone removed the link, and the engine moved no unreadable credentials
+aside (their device may still be linked). It is torn down locally the same way, `phone` is cleared,
+no `session_logged_out` audit row is written, and the route returns `409`. Start the session to link
+a device, or delete it; retrying the logout cannot change that.
 
 With `AUTO_START_SESSIONS=true`, auto-start selects sessions whose `phone` is non-null. Both a `200`
 and a `502` logout clear `phone`, and a WhatsApp-initiated unlink reported by a running engine clears
@@ -792,7 +793,7 @@ Returned via `transformSession`; status becomes `disconnected` and `phone` is cl
 auto-start does not resurrect the session). Recorded in the audit log as `session_logged_out`,
 distinguishing an intentional unlink from a plain stop.
 
-**Errors:** `400` session is not started (no engine to send through; the row is left untouched) · `401` · `403` · `404` not found · `409` Baileys: the session never linked, so there is nothing to unlink (stopped locally; `phone` cleared, no success audit; `start` it to link a device, or `delete` it) · `502` `SESSION_LOGOUT_INCOMPLETE` — session stopped locally but the logout operation did not complete (retryable; `phone` cleared, no success audit)
+**Errors:** `400` session is not started (no engine to send through; the row is left untouched) · `401` · `403` · `404` not found · `409` Baileys: the session has no linked device, so there is nothing to unlink (stopped locally; `phone` cleared, no success audit; `start` it to link a device, or `delete` it) · `502` `SESSION_LOGOUT_INCOMPLETE` — session stopped locally but the logout operation did not complete (retryable; `phone` cleared, no success audit)
 
 #### POST /api/sessions/:sessionId/force-kill
 
@@ -1324,16 +1325,16 @@ The single-recipient send routes (`send-text`, `send-template`, `send-image`, `s
 
 The key is 1-255 visible ASCII characters (a UUID works), unique per session, and is held for **24 hours** from the first request. Within that window:
 
-| Retry with the same key                                                                         | Answer                                                                                                     |
-| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| first request succeeded, same route and body                                                    | the first response again, with `Idempotent-Replayed: true`; nothing is sent                                |
-| first request still running                                                                     | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`; retry after it finishes                                               |
-| first request failed with an uncertain delivery outcome                                         | `409` `IDEMPOTENCY_OUTCOME_UNKNOWN`: the message may have gone out; check the chat, then use a **new** key |
-| first request was refused with `4xx` or `501` before calling the engine                         | the key was freed, so the retry runs as a new request                                                      |
-| transport explicitly reported that nothing was sent, or WhatsApp rate-limited the request first | the key was freed, so the retry runs as a new request                                                      |
-| different route or body (key order in the JSON does not matter)                                 | `422` `IDEMPOTENCY_KEY_REUSED`                                                                             |
+| Retry with the same key                                                             | Answer                                                                                                     |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| first request succeeded, same route and body                                        | the first response again, with `Idempotent-Replayed: true`; nothing is sent                                |
+| first request still running                                                         | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`; retry after it finishes                                               |
+| first request failed with an uncertain delivery outcome                             | `409` `IDEMPOTENCY_OUTCOME_UNKNOWN`: the message may have gone out; check the chat, then use a **new** key |
+| first request was refused with `4xx` or `501` before calling the engine             | the key was freed, so the retry runs as a new request                                                      |
+| the engine proved that nothing was sent, or WhatsApp rate-limited the request first | the key was freed, so the retry runs as a new request                                                      |
+| different route or body (key order in the JSON does not matter)                     | `422` `IDEMPOTENCY_KEY_REUSED`                                                                             |
 
-A malformed key, or the header sent twice, gets `400` `IDEMPOTENCY_KEY_INVALID`. A request still pending ten minutes after it was claimed (its node most likely stopped) also reads as `IDEMPOTENCY_OUTCOME_UNKNOWN`. HTTP status alone does not prove that nothing was sent: an engine can report `409` after attempting delivery, so engine-stage failures retain the key unless transport explicitly proves that nothing was sent. Keys are stored in the data database (`send_idempotency_keys`); concurrent processes using that database share the claim, and the session-owner proxy forwards the header. This does not change the deployment support limits in [Horizontal scaling](./13-horizontal-scaling.md). `send-bulk` does not take the header: retrying its request can create another batch. A call that outlives the 24-hour key window is outside the retry guarantee.
+A malformed key, or the header sent twice, gets `400` `IDEMPOTENCY_KEY_INVALID`. A request still pending ten minutes after it was claimed (its node most likely stopped) also reads as `IDEMPOTENCY_OUTCOME_UNKNOWN`. HTTP status alone does not prove that nothing was sent: an engine can report `409` after attempting delivery, so engine-stage failures retain the key unless the engine proves that nothing was sent: a transport failure before the message was handed over, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written. Keys are stored in the data database (`send_idempotency_keys`); concurrent processes using that database share the claim, and the session-owner proxy forwards the header. This does not change the deployment support limits in [Horizontal scaling](./13-horizontal-scaling.md). `send-bulk` does not take the header: retrying its request can create another batch. A call that outlives the 24-hour key window is outside the retry guarantee.
 
 #### GET /api/sessions/:sessionId/messages
 
@@ -1837,13 +1838,17 @@ A custom preview can carry an image, which WhatsApp renders as the large card ab
 `thumbnailBase64`, or `thumbnailUrl`, which is the only thing a custom preview fetches. As on the media
 routes, base64 wins when both are present. The URL goes through the same SSRF-guarded loader as a
 media URL (`SSRF_ALLOWED_HOSTS`, the session proxy, no redirects), and either form is capped at 5 MiB
-(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway re-encodes the image as a JPEG fitted inside
-1280x1280 (never enlarged, turned upright by its EXIF orientation, transparency made white) and uploads
-that to WhatsApp as the preview's high-quality thumbnail; Baileys is never handed the URL. A refused
-host or a failed fetch answers `400` (`503` when a fetch through the session's egress proxy fails before
-any response), an image over the cap `413`, and bytes that do not decode as an image (SVG, a truncated
-or corrupt file) `400`. Only a failed upload to WhatsApp sends the text with the preview but without
-the image, with a warning in the log.
+(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The image is read only after the recipient check, so a phone
+number WhatsApp reports as unregistered answers that `400` with nothing fetched or uploaded. The gateway
+re-encodes the image as a JPEG fitted inside 1280x1280 (never enlarged, turned upright by its EXIF
+orientation, transparency made white) and uploads that to WhatsApp as the preview's high-quality
+thumbnail; Baileys is never handed the URL. A refused host or a failed fetch answers `400` (`503` when a
+fetch through the session's egress proxy fails before any response), an image over the cap `413`, and
+bytes that do not decode as an image (SVG, a truncated or corrupt file) `400`; nothing was sent for any
+of them, so the `Idempotency-Key` is freed. The re-encode and the decode check need `sharp`: on a host
+where it cannot load, the image is uploaded as sent, and bytes that do not decode are not refused. Only
+a failed upload to WhatsApp sends the text with the preview but without the image, with a warning in
+the log.
 
 ```json
 {
@@ -1873,7 +1878,7 @@ the image, with a warning in the log.
 
 `messageId` is the WhatsApp message id from the engine. By default (`SIMULATE_TYPING`; set it to `false` to disable) a typing indicator and a humanising pause run before the send: 500 ms plus 45 ms per character, capped at `SIMULATE_TYPING_MAX_MS` (default 5000 ms), with +/-15% jitter; the pause never exceeds that cap, jitter included.
 
-**Errors:** `400` unknown body field, validation failure, session not active / blocked by a plugin hook, or a `customLinkPreview` image that is SSRF-blocked, cannot be fetched or does not decode (see **Link previews**) · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `413` the `customLinkPreview` image over 5 MiB, or over `MEDIA_DOWNLOAD_MAX_BYTES` if that is lower · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` a `customLinkPreview.thumbnailUrl` fetch through the session's egress proxy failed before any response, the proxy or the target at fault (nothing was sent, retryable); on Baileys, also when the recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
+**Errors:** `400` unknown body field, validation failure, session not active / blocked by a plugin hook, or a `customLinkPreview` image that is SSRF-blocked, cannot be fetched or does not decode (see **Link previews**; nothing was sent, the `Idempotency-Key` is freed); on Baileys, also a phone number WhatsApp reports as unregistered · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `413` the `customLinkPreview` image over 5 MiB, or over `MEDIA_DOWNLOAD_MAX_BYTES` if that is lower (nothing was sent, the `Idempotency-Key` is freed) · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` a `customLinkPreview.thumbnailUrl` fetch through the session's egress proxy failed before any response, the proxy or the target at fault (nothing was sent, retryable); on Baileys, also when the recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
 
 ##### Quoted sends
 
@@ -6416,7 +6421,7 @@ Update a plugin's base configuration object.
 
 Update failures are returned in-band as `{ "success": false, "message": "…" }` (HTTP 200).
 
-**Errors:** `400` extra top-level field · `401` · `403` · `404` unknown id
+**Errors:** `400` extra top-level field · `401` · `403` · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed
 
 ---
 
@@ -6449,7 +6454,7 @@ Set (or clear) a plugin config override for a specific session.
 { "success": true, "message": "Plugin chat-flow configuration for session session-1 updated" }
 ```
 
-**Errors:** `400` plugin is global (not session-scoped) / extra field · `401` · `403` · `404` unknown id
+**Errors:** `400` plugin is global (not session-scoped) / extra field · `401` · `403` · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed
 
 ---
 
@@ -6477,7 +6482,7 @@ Set which sessions a session-scoped plugin is activated for. This is a **full re
 
 **Response** `200` — the updated `PluginDto` (reflecting the new `activeSessions`).
 
-**Errors:** `400` plugin is global · `401` · `403` key is session-scoped (full activation replacement requires an unrestricted key) · `404` unknown id · `500` the plugin registry could not be written; nothing changed
+**Errors:** `400` plugin is global · `401` · `403` key is session-scoped (full activation replacement requires an unrestricted key) · `404` unknown id · `409` the plugin is being uninstalled; nothing was changed · `500` the plugin registry could not be written; nothing changed
 
 ---
 
@@ -6533,7 +6538,9 @@ Note: this DELETE returns `200` with a body (not the usual `204`).
 
 **Errors:** `400` cannot uninstall (e.g. built-in, or a package or storage folder that could not be removed; the emptied registry entry stays, so the call can be repeated) · `401` · `403` · `404` unknown id · `409` the plugin is still being restored after startup (retry shortly) · `500` the plugin registry could not be written; nothing was removed
 
-When only the final registry delete fails, the answer is `200` with a message that the emptied entry stayed; repeat the uninstall once the registry is writable.
+When only the final registry delete fails, the answer is `200` with a message that the emptied entry stayed and that names this call; repeat it once the registry is writable. The plugin is no longer listed by `GET /api/plugins`, so the dashboard has no card left to repeat it from. A `400` raised after the entry was emptied is still audited, as `plugin_uninstalled` with `partial: true` and the error. While the uninstall unloads the plugin, `PUT /api/plugins/:id/config`, `PUT /api/plugins/:id/config/:sessionId` and `PUT /api/plugins/:id/sessions` for it answer `409` and change nothing.
+
+The plugin's integration instances are not removed. Every boot that loads the id (after a reinstall, or with a package a part-way uninstall left behind) projects every enabled instance back onto the plugin: its config (secrets included) and its session scope. For a reinstall that starts with none of them, delete them first with `DELETE /api/integration/plugins/:pluginId/instances/:instanceId`, which works with the plugin gone.
 
 ---
 
@@ -7397,7 +7404,7 @@ These are the events OpenWA actually emits. A webhook is registered with an `eve
 | `call.accepted` / `call.rejected` / `call.missed` | A ringing call ended, whether answered, declined, or never picked up. **Baileys only**: whatsapp-web.js emits no call-outcome event                                                                                                   | `{ sessionId, callId, from, outcome, isVideo, isGroup, timestamp }`. `callId` matches the `call.received` that preceded it, so the pair can be correlated. The engines report _what_ happened, never _who_ did it: an accept can come from any linked device. An outcome is only sent for a call this session saw ring, and offline-replayed signalling for calls that ended while disconnected is dropped. WhatsApp's `terminate` is deliberately unmapped: it covers both a caller hanging up before answer and either side ending an answered call, with nothing to tell them apart                                                                                                          |
 | `status.received`                                 | A contact posts a status/story (opt-in — see below)                                                                                                                                                                                   | `{ sessionId, statusId, contact: { id, name?, pushName? }, type, caption?, hasMedia, mediaOmitted, omitReason?, postedAt, expiresAt }` — `statusId` is the store's `id` (usable with the status endpoints below); `postedAt`/`expiresAt` are epoch **milliseconds** (unlike the epoch-seconds convention for message timestamps), matching the `GET /status` store's own `Date`-backed fields                                                                                                                                                                                                                                                                                                   |
 
-> **`message.ack` on Baileys.** An own group or status message stays at `sent` unless the server rejects it, which still arrives as `failed`. The event is not limited to outbound messages: when the account's own phone reads a 1:1 chat, the messages received there are acked as `read` too, with no `fromMe` in the payload, and their stored copy moves to `read`.
+> **`message.ack` on Baileys.** An own group or status message stays at `sent` unless the server rejects it, which still arrives as `failed`. Acks are reported only for messages the account sent: when the account reads a received message on its phone, no `message.ack` fires for it and its stored copy keeps its status.
 
 > **`status.received` is opt-in and carries no media blob.** `status.received` is only delivered to a webhook whose `events` list explicitly includes `"status.received"` (or `"*"`) — registering for other events does not implicitly subscribe you to it. The payload never embeds media bytes: when `hasMedia` is `true`, fetch the file separately via `GET /api/sessions/:sessionId/status/:statusId/media`. Your own posted statuses never trigger this event — only inbound stories from contacts (an own-send echo is dropped before ingest).
 

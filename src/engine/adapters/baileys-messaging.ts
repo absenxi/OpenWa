@@ -42,7 +42,7 @@ import { MessageNotFoundError } from '../../common/errors/message-not-found.erro
 import { type createLogger } from '../../common/services/logger.service';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
-import { EngineNotSentError } from '../../common/errors/engine-not-sent.error';
+import { EngineNotSentError, markNothingSent } from '../../common/errors/engine-not-sent.error';
 import { parseWaId, userPart } from '../identity/wa-id';
 import { BAILEYS_QUERY_BUDGET_MS, confirmedWrite, withQueryDeadline } from './baileys-query-deadline';
 import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
@@ -162,7 +162,8 @@ export async function blockSvgDecoding(): Promise<void> {
  * Refuse a picture the image decoder cannot read, before Baileys hands it to that decoder: its own
  * conversion rejects such a file with an error nothing maps, which reached the client as a 500. An SVG is
  * one since blockSvgDecoding, and so is a file that is no image at all. Only the header is read. A sharp
- * that cannot load is left to the library, which reports that itself.
+ * that cannot load is left to the library, which reports that itself. The 400 is raised before anything
+ * reaches WhatsApp, so it carries markNothingSent.
  */
 export async function assertReadableImage(data: Buffer): Promise<void> {
   const sharp = await import('sharp').then(
@@ -173,8 +174,10 @@ export async function assertReadableImage(data: Buffer): Promise<void> {
   try {
     await sharp(data).metadata();
   } catch (error) {
-    throw new BadRequestException(
-      `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }
@@ -214,8 +217,10 @@ async function toPreviewJpeg(data: Buffer): Promise<Buffer> {
         .toBuffer(),
     );
   } catch (error) {
-    throw new BadRequestException(
-      `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }
@@ -227,9 +232,12 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
   if (!mimetype.startsWith('image/')) {
     // Deliberately a 400 rather than EngineNotSupportedError: the capability IS supported, this
     // particular payload cannot become a sticker. A 501 would report the wrong thing and would also
-    // make the row look unavailable to the parity gate's throw-scan.
-    throw new BadRequestException(
-      `A sticker must be a WebP image, or an image this gateway can convert to one. Received '${mimetype}'.`,
+    // make the row look unavailable to the parity gate's throw-scan. Like every refusal here it comes
+    // before anything reaches WhatsApp, so it carries markNothingSent.
+    throw markNothingSent(
+      new BadRequestException(
+        `A sticker must be a WebP image, or an image this gateway can convert to one. Received '${mimetype}'.`,
+      ),
     );
   }
   // Imported lazily so an unusable `sharp` (a native binary that will not build or load on an older
@@ -246,8 +254,10 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
       // same slot as the pipeline.
       const { pages = 1 } = await image.metadata();
       if (pages > MAX_STICKER_FRAMES) {
-        throw new BadRequestException(
-          `The sticker animation has ${pages} frames; at most ${MAX_STICKER_FRAMES} can be converted.`,
+        throw markNothingSent(
+          new BadRequestException(
+            `The sticker animation has ${pages} frames; at most ${MAX_STICKER_FRAMES} can be converted.`,
+          ),
         );
       }
       return image
@@ -259,8 +269,10 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
     if (error instanceof BadRequestException) throw error;
     // Bytes that do not decode as the image they claim to be. Refuse before the socket rather than
     // ship them mislabelled — that is the whole point.
-    throw new BadRequestException(
-      `The sticker image could not be converted to WebP: ${error instanceof Error ? error.message : String(error)}`,
+    throw markNothingSent(
+      new BadRequestException(
+        `The sticker image could not be converted to WebP: ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
 }
@@ -420,7 +432,10 @@ export class BaileysMessaging {
     // campaign whose template carries a slow or dead URL from stalling on every single message.
     // getUrlInfo above is still passed unconditionally, so the library's vulnerable generator stays
     // unreachable on the paths that do generate.
-    const content = {
+    //
+    // Built by send() only once the recipient has passed its check, so a number that is not on WhatsApp
+    // costs no preview image fetch, conversion or upload, and its 400 is not hidden behind an image error.
+    const content = async () => ({
       text,
       ...this.withMentions(mentions),
       ...(sendOptions?.linkPreview === true ? {} : { linkPreview: null }),
@@ -438,7 +453,7 @@ export class BaileysMessaging {
             },
           }
         : {}),
-    };
+    });
     const sent = await this.send(jid, content, options);
     if (sent) {
       void this.host.putStoredMessage(sent)?.catch(err =>
@@ -1028,11 +1043,16 @@ export class BaileysMessaging {
    * record is synchronous on the send's own continuation, ahead of the library's buffered echo.
    *
    * A send that fails after a stop or logout has torn its socket down is not ready (409), the same as
-   * one interrupted before it reached the socket; a failure on a socket still in place propagates.
+   * one interrupted before it reached the socket; a failure on a socket still in place propagates. A swap
+   * found before sock.sendMessage is called sent nothing, so that 409 carries markNothingSent. The send is
+   * not moved to the new socket: a logout followed by a relink to another account looks the same.
+   *
+   * `content` may be a function, for content that costs work to build (a link preview image): it is
+   * called after the recipient check, and its own errors are not send refusals.
    */
   private async send(
     jid: string,
-    content: Parameters<WASocket['sendMessage']>[1],
+    content: Parameters<WASocket['sendMessage']>[1] | (() => Promise<Parameters<WASocket['sendMessage']>[1]>),
     options?: Parameters<WASocket['sendMessage']>[2],
     expected?: WASocket,
   ): Promise<WAMessage | undefined> {
@@ -1042,24 +1062,25 @@ export class BaileysMessaging {
       try {
         numberId = await this.getNumberId(jid);
       } catch (error) {
-        if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+        if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
         throw new EngineNotSentError(`WhatsApp could not check the recipient before send: ${String(error)}`);
       }
-      if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+      if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
       if (!numberId) throw new BadRequestException(`WhatsApp reports recipient ${jid} is not registered`);
       const canonical = this.host.toEngineJid(numberId);
       if (canonical !== jid) jid = await this.toDeliverableJid(numberId);
     }
-    if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+    const message = typeof content === 'function' ? await content() : content;
+    if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
     let sent: WAMessage | undefined;
     try {
-      sent = options ? await sock.sendMessage(jid, content, options) : await sock.sendMessage(jid, content);
+      sent = options ? await sock.sendMessage(jid, message, options) : await sock.sendMessage(jid, message);
     } catch (error) {
       if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
       throw mapSendRefusal(error);
     }
     // Mutations are announced by their library echo; no local callback replaces it.
-    if (!('react' in content || 'delete' in content || 'edit' in content)) this.host.rememberOwnSend(sent?.key?.id);
+    if (!('react' in message || 'delete' in message || 'edit' in message)) this.host.rememberOwnSend(sent?.key?.id);
     return sent;
   }
 
