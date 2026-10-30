@@ -358,6 +358,16 @@
         "always": "Siempre"
       },
       "saveContactUnavailable": "Necesita un número de teléfono conocido: este chat solo tiene un ID de privacidad (@lid)."
+    },
+    "templateTitle": "Plantillas",
+    "templates": {
+      "title": "Plantillas",
+      "searchPlaceholder": "Buscar plantillas...",
+      "empty": "No se encontraron plantillas",
+      "variablesTitle": "Completar variables de plantilla",
+      "send": "Enviar plantilla",
+      "back": "Atrás",
+      "loadError": "Error al cargar las plantillas"
     }
   },
   "errorBoundary": {

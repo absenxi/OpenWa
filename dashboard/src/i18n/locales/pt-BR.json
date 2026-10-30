@@ -358,6 +358,16 @@
         "always": "Sempre"
       },
       "saveContactUnavailable": "Precisa de um número de telefone conhecido: esta conversa tem só um ID de privacidade (@lid)."
+    },
+    "templateTitle": "Modelos",
+    "templates": {
+      "title": "Modelos",
+      "searchPlaceholder": "Pesquisar modelos...",
+      "empty": "Nenhum modelo encontrado",
+      "variablesTitle": "Preencher variáveis do modelo",
+      "send": "Enviar modelo",
+      "back": "Voltar",
+      "loadError": "Falha ao carregar modelos"
     }
   },
   "errorBoundary": {

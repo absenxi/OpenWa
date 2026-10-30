@@ -364,6 +364,16 @@
         "always": "תמיד"
       },
       "saveContactUnavailable": "נדרש מספר טלפון ידוע: לשיחה זו יש רק מזהה פרטיות (@lid)."
+    },
+    "templateTitle": "תבניות",
+    "templates": {
+      "title": "תבניות",
+      "searchPlaceholder": "חיפוש תבניות...",
+      "empty": "לא נמצאו תבניות",
+      "variablesTitle": "מילוי משתני תבנית",
+      "send": "שלח תבנית",
+      "back": "חזרה",
+      "loadError": "טעינת התבניות נכשלה"
     }
   },
   "errorBoundary": {

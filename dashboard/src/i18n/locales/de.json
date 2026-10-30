@@ -353,6 +353,16 @@
         "always": "Immer"
       },
       "saveContactUnavailable": "Braucht eine bekannte Telefonnummer: Dieser Chat hat nur eine Datenschutz-ID (@lid)."
+    },
+    "templateTitle": "Vorlagen",
+    "templates": {
+      "title": "Vorlagen",
+      "searchPlaceholder": "Vorlagen durchsuchen...",
+      "empty": "Keine Vorlagen gefunden",
+      "variablesTitle": "Vorlagenvariablen ausfüllen",
+      "send": "Vorlage senden",
+      "back": "Zurück",
+      "loadError": "Vorlagen konnten nicht geladen werden"
     }
   },
   "errorBoundary": {

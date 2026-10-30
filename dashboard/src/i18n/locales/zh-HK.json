@@ -353,6 +353,16 @@
         "always": "永遠"
       },
       "saveContactUnavailable": "需要已知的電話號碼：此聊天只有私隱 ID（@lid）。"
+    },
+    "templateTitle": "範本",
+    "templates": {
+      "title": "範本",
+      "searchPlaceholder": "搜尋範本...",
+      "empty": "未找到範本",
+      "variablesTitle": "填寫範本變數",
+      "send": "傳送範本",
+      "back": "返回",
+      "loadError": "載入範本失敗"
     }
   },
   "errorBoundary": {

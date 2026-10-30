@@ -353,6 +353,16 @@
         "always": "Her zaman"
       },
       "saveContactUnavailable": "Bilinen bir telefon numarası gerekir: bu sohbetin yalnızca bir gizlilik kimliği (@lid) var."
+    },
+    "templateTitle": "Şablonlar",
+    "templates": {
+      "title": "Şablonlar",
+      "searchPlaceholder": "Şablonları ara...",
+      "empty": "Şablon bulunamadı",
+      "variablesTitle": "Şablon değişkenlerini doldur",
+      "send": "Şablonu gönder",
+      "back": "Geri",
+      "loadError": "Şablonlar yüklenemedi"
     }
   },
   "errorBoundary": {

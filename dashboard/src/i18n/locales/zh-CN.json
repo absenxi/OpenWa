@@ -353,6 +353,16 @@
         "always": "始终"
       },
       "saveContactUnavailable": "需要已知的电话号码：此聊天只有隐私 ID（@lid）。"
+    },
+    "templateTitle": "模板",
+    "templates": {
+      "title": "模板",
+      "searchPlaceholder": "搜索模板...",
+      "empty": "未找到模板",
+      "variablesTitle": "填写模板变量",
+      "send": "发送模板",
+      "back": "返回",
+      "loadError": "加载模板失败"
     }
   },
   "errorBoundary": {

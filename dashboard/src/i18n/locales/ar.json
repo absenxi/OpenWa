@@ -374,6 +374,16 @@
         "always": "دائمًا"
       },
       "saveContactUnavailable": "يتطلب رقم هاتف معروفًا: لهذه المحادثة معرّف خصوصية فقط (@lid)."
+    },
+    "templateTitle": "القوالب",
+    "templates": {
+      "title": "القوالب",
+      "searchPlaceholder": "البحث في القوالب...",
+      "empty": "لم يتم العثور على قوالب",
+      "variablesTitle": "ملء متغيرات القالب",
+      "send": "إرسال القالب",
+      "back": "رجوع",
+      "loadError": "فشل تحميل القوالب"
     }
   },
   "errorBoundary": {
