@@ -40,8 +40,8 @@ timeline
                  : Bundled Traefik removed
                  : Bring-your-own reverse proxy
 
-    section v0.5.0-v0.25.x - Incremental Releases (Released)
-        Jun-Sep 2026 : Integration Fabric provisioning
+    section v0.5.0-v0.26.x - Incremental Releases (Released)
+        Jun-Oct 2026 : Integration Fabric provisioning
                      : Java & Go SDKs
                      : Live message edits
                      : Chat kind discriminator & status store
@@ -82,7 +82,7 @@ timeline
 | v0.10.x | Chat `kind` discriminator, 24-hour status store, Docker Hub dual-publish                             | ✅ Released |
 | v0.11.0 | SDK poll / profile-picture / status-media coverage, security & reliability hardening                 | ✅ Released |
 | v0.12.x | Session/engine decomposition (`EngineRegistry`), plugin lifecycle and configuration-precedence fixes | ✅ Released |
-| v0.13+  | Incremental releases through v0.25.x; see `CHANGELOG.md`                                             | ✅ Released |
+| v0.13+  | Incremental releases through v0.26.x; see `CHANGELOG.md`                                             | ✅ Released |
 | v1.0.0  | Enterprise Ready (K8s Operator, multi-tenant)                                                        | 📋 Planned  |
 
 > SDK / docs-site / observability features are delivered **incrementally** as they're additive — they no
@@ -529,10 +529,10 @@ flowchart LR
         V020[v0.2.0 - i18n, Real-time Chats,<br/>Webhook Delivery-state & Hardening]
     end
 
-    subgraph v0.x["✅ Released (v0.3-v0.25.x)"]
+    subgraph v0.x["✅ Released (v0.3-v0.26.x)"]
         V030[v0.3.0 - Engine Pluggability<br/>Baileys engine + plugin layer]
         V040[v0.4.0 - Single-Port Deployment<br/>Dashboard on API port, no bundled Traefik]
-        V011[v0.5.0-v0.25.x - Incremental releases<br/>see the CHANGELOG]
+        V011[v0.5.0-v0.26.x - Incremental releases<br/>see the CHANGELOG]
     end
 
     subgraph v1.x["v1.x Series - Enterprise"]
@@ -663,10 +663,11 @@ PR, and pushing the tag from `main` hands everything else to `.github/workflows/
 
 ### The release commit
 
-Five files change on a patch. A MINOR changes six: `SECURITY.md` names the supported minor in its
+Five files change on a patch. A MINOR changes seven: `SECURITY.md` names the supported minor in its
 prose, its table row and its `< X.Y` lower bound, and `npm run check:versions` fails without it — a
-gate that runs on the pushed tag, so omitting it means deleting the tag and cutting again. Nothing
-else belongs in this commit.
+gate that runs on the pushed tag, so omitting it means deleting the tag and cutting again. This roadmap's
+released range (`v0.<minor>.x`, in four places) moves to the new minor, or `npm run test:docs` fails.
+Nothing else belongs in this commit.
 
 ```bash
 npm version --no-git-tag-version <version>   # package.json + package-lock.json
@@ -717,9 +718,9 @@ cd dashboard && npm run lint && npm run format:check && npm run typecheck && npm
 Docker), and `docker` waits on `test-postgres`. Run those locally when the release touches their files.
 
 ```bash
-# SECURITY.md only on a MINOR; the chart's own `version:` bumps a patch alongside `appVersion`.
+# SECURITY.md and docs/15 only on a MINOR; the chart's own `version:` bumps a patch alongside `appVersion`.
 git switch -c chore/release-<version>
-git add package.json package-lock.json openapi.json CHANGELOG.md charts/openwa/Chart.yaml SECURITY.md
+git add package.json package-lock.json openapi.json CHANGELOG.md charts/openwa/Chart.yaml SECURITY.md docs/15-project-roadmap.md
 git commit -m "chore(release): v<version>"
 git push origin chore/release-<version>   # open the PR to main and merge it once CI is green
 
