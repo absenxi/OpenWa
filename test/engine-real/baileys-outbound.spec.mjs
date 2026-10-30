@@ -230,18 +230,19 @@ test('a failed LID query still uses a canonical phone destination', async t => {
   assert.equal(sock.sendMessage.mock.calls[0].arguments[0], PN);
 });
 
+const silent = {
+  level: 'silent',
+  child: () => silent,
+  trace: noop,
+  debug: noop,
+  info: noop,
+  warn: noop,
+  error: noop,
+};
+
 // A real socket, built against a closed local port so nothing reaches WhatsApp, logged out through the compiled
 // lifecycle. query() is replaced to record the unlink it would send.
 function loggedOutSocket(t) {
-  const silent = {
-    level: 'silent',
-    child: () => silent,
-    trace: noop,
-    debug: noop,
-    info: noop,
-    warn: noop,
-    error: noop,
-  };
   const creds = lib.initAuthCreds();
   const sock = lib.default({
     auth: { creds, keys: { get: () => Promise.resolve({}), set: () => Promise.resolve() } },
@@ -311,4 +312,49 @@ test('a logout right after pairing, before the restart, unlinks the device', asy
   assert.equal(sent[0].content[0].tag, 'remove-companion-device');
   assert.equal(sent[0].content[0].attrs.jid, '6281234567890:12@s.whatsapp.net');
   assert.equal(fs.existsSync(authPath), false);
+});
+
+// A real socket, built against a closed local port, from the credentials a first link leaves for its restart: a
+// personal account's pair-success carries no name (configureSuccessfulPairing takes it from the business node).
+function linkedSocket(t) {
+  const creds = lib.initAuthCreds();
+  creds.me = { id: '6281234567890:12@s.whatsapp.net', lid: '123456789012345:12@lid' };
+  const sock = lib.default({
+    auth: { creds, keys: { get: () => Promise.resolve({}), set: () => Promise.resolve() } },
+    logger: silent,
+    waWebSocketUrl: 'ws://127.0.0.1:1',
+    connectTimeoutMs: 1000,
+  });
+  sock.ev.on('connection.update', noop);
+  t.after(() => sock.end(undefined));
+  const sent = [];
+  sock.sendPresenceUpdate = type => {
+    sent.push(type);
+    return Promise.resolve();
+  };
+  const messaging = new BaileysMessaging({
+    ensureReady: noop,
+    getSocket: () => sock,
+    getSocketOrNull: () => sock,
+    logger: { warn: noop },
+  });
+  return { sock, creds, sent, messaging };
+}
+
+test('own presence is published once the account name has synced on the running socket', async t => {
+  const { sock, creds, sent, messaging } = linkedSocket(t);
+  // The app-state pushNameSetting (or an own message's pushName) reaches the socket as this creds.update.
+  sock.ev.emit('creds.update', { me: { ...creds.me, name: 'Synced Name' } });
+  assert.equal(creds.me.name, 'Synced Name');
+  assert.equal(sock.user.name, undefined);
+
+  await messaging.setOnlinePresence(false);
+
+  assert.deepEqual(sent, ['unavailable']);
+});
+
+test('own presence is refused while the account has no name, as Baileys would ignore it', async t => {
+  const { sent, messaging } = linkedSocket(t);
+  await assert.rejects(messaging.setOnlinePresence(true), EngineNotReadyError);
+  assert.deepEqual(sent, []);
 });

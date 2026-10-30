@@ -519,12 +519,14 @@ export class BaileysMessaging {
    * failure surfaces instead of leaving the account silently online (#871).
    *
    * Baileys resolves this call without sending anything when `creds.me.name` is unset (it logs
-   * "no name present, ignoring presence update request" and returns). `sock.user` is that cred.
-   * Refusing here keeps PUT /presence from reporting success for an update that never left.
+   * "no name present, ignoring presence update request" and returns). It reads the live credentials,
+   * so this does too: `sock.user` is a copy of creds.me made when the socket was built, and a newly
+   * linked account's name syncs after that. Refusing here keeps PUT /presence from reporting success
+   * for an update that never left.
    */
   async setOnlinePresence(available: boolean): Promise<void> {
     this.host.ensureReady();
-    if (!this.sock().user?.name) {
+    if (!this.sock().authState?.creds?.me?.name) {
       throw new EngineNotReadyError(
         'The account push name is not available yet, so this presence update would be ignored. Retry once the session has synced its profile name.',
       );
