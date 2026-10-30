@@ -833,9 +833,19 @@ export class SessionEngineLifecycle {
         // teardownEngineSafely is itself time-bound, so this can't wedge a second time.
         await this.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
         if (isCurrentTimeout()) {
-          await this.sessionRepository.update(id, { status: SessionStatus.DISCONNECTED });
+          // Only on a row that is still this node's or has no owner, as retireLaunchedEngine writes: once the
+          // lease was lost during this init, the row belongs to the peer that adopted it and runs its engine.
+          const nodeId = this.ownership?.nodeId;
+          const ours =
+            nodeId === undefined
+              ? id
+              : [
+                  { id, nodeId },
+                  { id, nodeId: IsNull() },
+                ];
+          const { affected } = await this.sessionRepository.update(ours, { status: SessionStatus.DISCONNECTED });
           // A replacement may reach READY while the database response is still pending.
-          if (isCurrentTimeout()) this.broadcaster.announce(id, SessionStatus.DISCONNECTED);
+          if (affected !== 0 && isCurrentTimeout()) this.broadcaster.announce(id, SessionStatus.DISCONNECTED);
         }
         // Map to a diagnostic 504 like the auth-timeout branch below, so a wedged init doesn't escape as a
         // bare 500 (#733 follow-up). This deadline covers EVERY cause and cannot tell them apart: the
