@@ -212,7 +212,9 @@
 > liveness watchdog and reconnect timers still act on whatever is in the local
 > registry. `BulkMessageService` keeps its live batch state in process, so a takeover cannot resume
 > a batch — only fail it. MCP/agent tool invocations execute on the node that received them rather
-> than being forwarded.
+> than being forwarded. A key restricted to selected chats matches a chat's `@lid` and phone forms
+> through the shared `lid_mappings` table; while a node cannot read that table, it matches with the
+> pairings it holds in memory, which another node may have changed since.
 >
 > Everything below (node affinity, `replicas: 3`) remains a **design sketch** until those
 > land.
