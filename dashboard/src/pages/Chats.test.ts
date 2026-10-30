@@ -188,6 +188,8 @@ let firstPageExtra: ChatMessage[] = [];
 
 // The id a text send answers with. whatsapp-web.js answers '' when it cannot read the sent id back.
 let sendTextId = 'wamid.out.1';
+// The id an image send answers with; '' as whatsapp-web.js answers when it cannot read the sent id back.
+let sendImageId = 'wamid.out.image';
 
 function holdSend(): () => void {
   let release!: () => void;
@@ -376,6 +378,10 @@ function installFetchStub(): void {
     if (method === 'POST' && path === `/api/sessions/${SESSION.id}/messages/send-audio`) {
       return Promise.resolve(jsonResponse({ messageId: 'wamid.out.audio', timestamp: 1_700_000_100 }));
     }
+    if (method === 'POST' && path === `/api/sessions/${SESSION.id}/messages/send-image`) {
+      const send = () => jsonResponse({ messageId: sendImageId, timestamp: 1_700_000_100 });
+      return sendGate ? sendGate.then(send) : Promise.resolve(send());
+    }
     if (method === 'POST' && path === `/api/sessions/${SESSION.id}/messages/send-document`) {
       return Promise.resolve(jsonResponse({ messageId: 'wamid.out.document', timestamp: 1_700_000_100 }));
     }
@@ -451,6 +457,7 @@ afterEach(async () => {
   firstPageGate = null;
   firstPageExtra = [];
   sendTextId = 'wamid.out.1';
+  sendImageId = 'wamid.out.image';
   olderPageFails = false;
   olderPageExtra = [];
   chatsResponder = null;
@@ -4589,4 +4596,97 @@ test('the media viewer moves to the next image and stays there', async () => {
   await waitFor(() => assert.ok(container.querySelector('.room-messages img[src="http://localhost/media/new.png"]')));
   await flush();
   assert.equal(viewerSlideSrc(), 'http://localhost/media/b.png', 'the viewer went back to the image it was opened on');
+});
+
+// ── An image opened while it is still being sent ─────────────────────────
+
+/**
+ * Send an image to Alice with the send held open, and open the media viewer on its optimistic bubble. Returns the
+ * thread, the src the viewer shows, and the release for the send.
+ */
+async function viewImageBeingSent(t: TestContext): Promise<{ thread: HTMLElement; src: string; release: () => void }> {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  // jsdom's File is not a Blob Node's URL accepts; the staged preview needs only some URL.
+  t.mock.method(URL, 'createObjectURL', () => 'blob:staged-preview');
+  t.mock.method(URL, 'revokeObjectURL', () => undefined);
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+  await stageAttachment(container, 'photo.png', 'image/png');
+  const release = holdSend();
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  const bubble = await waitFor(() => {
+    const found = thread.querySelector('img.chat-image-media[src^="data:image/png"]');
+    assert.ok(found, 'the optimistic image bubble did not render');
+    return found;
+  });
+  fireEvent.click(bubble);
+  const src = await waitFor(() => {
+    const shown = viewerSlideSrc() ?? '';
+    assert.ok(shown.startsWith('data:image/png'), 'the viewer did not open on the image being sent');
+    return shown;
+  });
+  return { thread, src, release };
+}
+
+test('the media viewer opened on an image being sent stays on it when the send is confirmed', async t => {
+  const { waitFor } = rtl;
+  const { thread, src, release } = await viewImageBeingSent(t);
+
+  release();
+  await waitFor(() => assert.ok(thread.querySelector('[data-wa-message-id="wamid.out.image"] img.chat-image-media')));
+  await flush();
+  assert.equal(viewerSlideSrc(), src, 'the viewer closed by itself when the send it showed was confirmed');
+
+  // The echo of the send then restamps the row with the time the engine gives it; the viewer follows the message.
+  receiveEvent('message.sent', {
+    id: 'wamid.out.image',
+    chatId: CHAT.id,
+    from: 'me',
+    to: CHAT.id,
+    body: '',
+    type: 'image',
+    fromMe: true,
+    timestamp: 1_700_000_100,
+  });
+  await waitFor(() => assert.equal(rtl.within(thread).queryByText('Today') === null, true, 'the echo was not applied'));
+  await flush();
+  assert.equal(viewerSlideSrc(), src, 'the viewer closed when the echo restamped the confirmed image');
+
+  // Deleted for everyone, it is gone for good and the viewer closes.
+  receiveEvent('message.revoked', revokeEvent('wamid.out.image'));
+  await waitFor(() => assert.equal(document.querySelector('[role="dialog"]') === null, true, 'the viewer stayed open'));
+});
+
+test('the media viewer stays on an image being sent when the echo of the send lands before its answer', async t => {
+  const { waitFor } = rtl;
+  const { thread, src, release } = await viewImageBeingSent(t);
+
+  receiveEvent('message.sent', {
+    id: 'wamid.out.image',
+    chatId: CHAT.id,
+    from: 'me',
+    to: CHAT.id,
+    body: '',
+    type: 'image',
+    fromMe: true,
+    timestamp: 1_700_000_100,
+  });
+  await waitFor(() => assert.ok(thread.querySelector('[data-wa-message-id="wamid.out.image"]')));
+  release();
+  await waitFor(() => assert.ok(thread.querySelector('[data-wa-message-id="wamid.out.image"] img.chat-image-media')));
+  await flush();
+  assert.equal(viewerSlideSrc(), src, 'the viewer closed by itself when the send it showed was confirmed');
+});
+
+test('the media viewer stays on an image being sent when the engine confirms it without an id', async t => {
+  const { waitFor } = rtl;
+  sendImageId = '';
+  const { thread, src, release } = await viewImageBeingSent(t);
+
+  release();
+  await waitFor(() => assert.ok(thread.querySelector('.message-status-icon.sent')));
+  await flush();
+  assert.equal(viewerSlideSrc(), src, 'the viewer closed by itself when the send it showed was confirmed');
 });

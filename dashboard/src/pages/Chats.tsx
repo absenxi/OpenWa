@@ -113,6 +113,10 @@ const LID_LOOKUP_GAP_MS = 1000;
 // the gateway answers a stalled engine at 180 s, so this is far above a healthy walk and below that.
 const BACKGROUND_RELOAD_DEADLINE_MS = 120_000;
 
+// The image the media viewer shows: its key in the thread, and when its row was made (see `lightbox` below).
+type ViewedImage = { key: string; createdAt: string };
+const viewedImage = (m: ChatMessageView): ViewedImage => ({ key: m.waMessageId ?? m.id, createdAt: m.createdAt });
+
 // mergeDeliveryStatus (forward-only delivery-tick merge) is shared with mergeOrAppend in utils/chatMessages
 // so the WS append path and the ack path apply the exact same rule.
 
@@ -313,8 +317,10 @@ export function Chats() {
   const queryClient = useQueryClient();
 
   // The media viewer holds the message it shows by the key the thread merges by (waMessageId ?? id, kept when a refetch
-  // swaps a live row for its stored one), never by list position: the image list is rebuilt from the live thread.
-  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
+  // swaps a live row for its stored one), never by list position: the image list is rebuilt from the live thread. An
+  // image still being sent is held under its placeholder's temp_ id; the confirmed row that replaces it keeps the
+  // placeholder's createdAt (ChatComposer spreads it), which is how the viewer follows it to its real key.
+  const [lightbox, setLightbox] = useState<ViewedImage | null>(null);
 
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
   // The open room's draft text lives here (not in ChatComposer) so it survives closing and reopening the room. Each
@@ -1930,12 +1936,21 @@ export function Chats() {
       })),
     [imageMessages, formatChatTime],
   );
-  const lightboxIndex = imageMessages.findIndex(m => (m.waMessageId ?? m.id) === lightboxKey);
+  const lightboxIndex =
+    lightbox === null
+      ? -1
+      : imageMessages.findIndex(
+          m =>
+            (m.waMessageId ?? m.id) === lightbox.key ||
+            (lightbox.key.startsWith('temp_') && m.direction === 'outgoing' && m.createdAt === lightbox.createdAt),
+        );
   // An image that left the thread (deleted for everyone, its payload dropped) closes the viewer for good: a key kept
-  // would open it again by itself once the image came back.
+  // would open it again by itself once the image came back. A confirmed send moves the viewer to the row's real key.
   useEffect(() => {
-    if (lightboxKey !== null && lightboxIndex < 0) setLightboxKey(null);
-  }, [lightboxKey, lightboxIndex]);
+    if (lightbox === null) return;
+    const shown = lightboxIndex < 0 ? null : viewedImage(imageMessages[lightboxIndex]);
+    if (shown?.key !== lightbox.key) setLightbox(shown);
+  }, [lightbox, lightboxIndex, imageMessages]);
 
   return (
     <div className="chats-page">
@@ -2172,7 +2187,7 @@ export function Chats() {
                   measureMedia={measureMedia}
                   onOpenImage={messageId => {
                     const opened = imageMessages.find(m => m.id === messageId);
-                    if (opened) setLightboxKey(opened.waMessageId ?? opened.id);
+                    if (opened) setLightbox(viewedImage(opened));
                   }}
                   onReply={setReplyingTo}
                   onReact={handleReactMessage}
@@ -2376,10 +2391,10 @@ export function Chats() {
       <MediaLightbox
         items={imageMedia}
         index={lightboxIndex < 0 ? null : lightboxIndex}
-        onClose={() => setLightboxKey(null)}
+        onClose={() => setLightbox(null)}
         onNavigate={i => {
           const shown = imageMessages[i];
-          if (shown) setLightboxKey(shown.waMessageId ?? shown.id);
+          if (shown) setLightbox(viewedImage(shown));
         }}
       />
 
