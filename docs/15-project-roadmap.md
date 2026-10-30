@@ -657,6 +657,9 @@ PR, and pushing the tag from `main` hands everything else to `.github/workflows/
 - Pick the version per [15.2](#152-version-numbering). Pre-1.0, a release whose `[Unreleased]`
   section has **any** breaking entry or an **Upgrade notes** heading is a MINOR; patch releases
   carry neither.
+- The amd64 image's Chrome for Testing pin (`chrome@<version>` in the `Dockerfile`) is the current
+  Stable in `last-known-good-versions.json`. Nothing else refreshes it and no image scan sees it, so
+  bump it on `main` first, as the comment above that install describes.
 
 ### The release commit
 
