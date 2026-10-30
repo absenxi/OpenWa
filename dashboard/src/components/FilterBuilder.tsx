@@ -56,6 +56,11 @@ function defaultValueFor(kind: FieldKind): WebhookFilterCondition['value'] {
   return [];
 }
 
+const PHONE_MAX_DIGITS = 15;
+const phoneDigits = (value: string) => normalizePhoneText(value).replace(/[^0-9]/g, '');
+// A typed number that cannot be added, so the field says why instead of ignoring Enter.
+const isTooLong = (raw: string) => !raw.includes('@') && phoneDigits(raw).length > PHONE_MAX_DIGITS;
+
 /**
  * Accepts a full JID or a phone number; normalizes bare numbers to `<digits>@c.us`. More than 15 digits (E.164) is no
  * phone number, such as two numbers typed with a space between them, so it is not added.
@@ -64,8 +69,8 @@ function normalizeToJid(raw: string): string | null {
   const value = raw.trim();
   if (!value) return null;
   if (value.includes('@')) return value.toLowerCase();
-  const digits = normalizePhoneText(value).replace(/[^0-9]/g, '');
-  return digits && digits.length <= 15 ? `${digits}@c.us` : null;
+  const digits = phoneDigits(value);
+  return digits && digits.length <= PHONE_MAX_DIGITS ? `${digits}@c.us` : null;
 }
 
 interface ContactChipsInputProps {
@@ -178,6 +183,11 @@ function ContactChipsInput({ value, onChange, chats }: ContactChipsInputProps) {
             >
               {t('webhooks.filters.addValue', { value: normalizeToJid(text) })}
             </button>
+          )}
+          {isTooLong(text) && (
+            <div className="chips-suggestion-note" role="status">
+              {t('messageTester.tooLong', { max: PHONE_MAX_DIGITS })}
+            </div>
           )}
         </div>
       )}
