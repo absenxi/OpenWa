@@ -50,7 +50,8 @@ export function bindModalA11y(
 
   const onKeyDown = (event: KeyboardEvent) => {
     if (modalStack[modalStack.length - 1] !== stackEntry) return;
-    if (event.key === 'Escape') {
+    // An input method takes Escape to cancel the text it is composing; closing on it would drop the form.
+    if (event.key === 'Escape' && !event.isComposing) {
       // Capture phase: nested widgets (selects, menus) may also listen for Escape — the dialog
       // owns dismissal while it is open.
       event.stopPropagation();
