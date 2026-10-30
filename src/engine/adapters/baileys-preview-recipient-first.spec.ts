@@ -4,6 +4,7 @@ import { BadRequestException } from '@nestjs/common';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { BaileysMessaging, blockSvgDecoding, type BaileysMessagingHost } from './baileys-messaging';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { BAILEYS_QUERY_BUDGET_MS } from './baileys-query-deadline';
 
 const PNG_BYTES = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -23,6 +24,7 @@ describe('a custom link preview image on a Baileys text send', () => {
   let current: WASocket | null;
   let prepareWAMessageMedia: jest.Mock;
   let messaging: BaileysMessaging;
+  let proxyUrl: string | undefined;
 
   beforeAll(async () => {
     await blockSvgDecoding();
@@ -42,6 +44,7 @@ describe('a custom link preview image on a Baileys text send', () => {
   beforeEach(() => {
     process.env.SSRF_ALLOWED_HOSTS = '127.0.0.1';
     fetches = 0;
+    proxyUrl = undefined;
     sock = {
       onWhatsApp: jest.fn((jid: string) => Promise.resolve([{ jid, exists: true }])),
       sendMessage: jest.fn().mockResolvedValue({ key: { id: 'M1' }, messageTimestamp: 1 }),
@@ -53,7 +56,7 @@ describe('a custom link preview image on a Baileys text send', () => {
       .mockResolvedValue({ imageMessage: { directPath: '/d', jpegThumbnail: new Uint8Array([1]) } });
     const host = {
       ensureReady: () => undefined,
-      sessionProxyUrl: () => undefined,
+      sessionProxyUrl: () => proxyUrl,
       getSocket: () => sock as unknown as WASocket,
       getSocketOrNull: () => current,
       logger: { log: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -143,5 +146,36 @@ describe('a custom link preview image on a Baileys text send', () => {
       EngineNotReadyError,
     );
     expect(sock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  // Baileys sets no upload deadline, and a session proxy's agent has no idle timeout to end a stalled upload.
+  it('bounds the preview image upload and a media send through a session proxy', async () => {
+    proxyUrl = 'http://proxy.example:8080';
+    const bounded = expect.objectContaining({ mediaUploadTimeoutMs: BAILEYS_QUERY_BUDGET_MS }) as unknown;
+
+    await send('628123456789@c.us', { thumbnailBase64: PNG_BYTES.toString('base64') });
+    await messaging.sendImageMessage('628123456789@c.us', { data: PNG_BYTES, mimetype: 'image/png' });
+
+    expect(prepareWAMessageMedia).toHaveBeenCalledWith(expect.anything(), bounded);
+    expect(sock.sendMessage).toHaveBeenNthCalledWith(1, '628123456789@s.whatsapp.net', expect.anything(), bounded);
+    expect(sock.sendMessage).toHaveBeenNthCalledWith(2, '628123456789@s.whatsapp.net', expect.anything(), bounded);
+  });
+
+  // Node's global agent ends a stalled upload after 5 s idle, and a request timeout would replace it.
+  it('leaves the uploads of a direct session to the idle timeout of its agent', async () => {
+    await send('628123456789@c.us', { thumbnailBase64: PNG_BYTES.toString('base64') });
+    await messaging.sendImageMessage('628123456789@c.us', { data: PNG_BYTES, mimetype: 'image/png' });
+
+    expect(prepareWAMessageMedia).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.not.objectContaining({ mediaUploadTimeoutMs: expect.anything() as unknown }),
+    );
+    expect(sock.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '628123456789@s.whatsapp.net',
+      expect.anything(),
+      expect.not.objectContaining({ mediaUploadTimeoutMs: expect.anything() as unknown }),
+    );
+    expect(sock.sendMessage.mock.calls[1]).toHaveLength(2);
   });
 });

@@ -1,7 +1,7 @@
 import * as tar from 'tar-stream';
 import { createGunzip, createGzip } from 'zlib';
 import { Readable, PassThrough, Transform, pipeline } from 'stream';
-import { StreamableFile } from '@nestjs/common';
+import { ServiceUnavailableException, StreamableFile } from '@nestjs/common';
 import type { Response } from 'express';
 import { createLogger, LoggerService } from '../services/logger.service';
 import { positiveIntFromEnv } from '../utils/env-int';
@@ -43,6 +43,24 @@ export interface ExportFileSource {
 }
 
 const storedFileLogger = createLogger('StoredFile');
+
+/** Seconds a download refused for a full pool is told to wait: a place frees as soon as any open download ends. */
+export const DOWNLOADS_BUSY_RETRY_AFTER_SECONDS = 1;
+
+/** A download refused at once because the S3 download pool is full. */
+export class DownloadsBusyException extends ServiceUnavailableException {
+  constructor() {
+    super('Too many media downloads are in progress; retry shortly');
+  }
+}
+
+/** For a download route's `.catch`: a refusal for a full pool goes out with a Retry-After. Every error is rethrown. */
+export function retryAfterWhenBusy(res: Response): (error: unknown) => never {
+  return error => {
+    if (error instanceof DownloadsBusyException) res.set('Retry-After', String(DOWNLOADS_BUSY_RETRY_AFTER_SECONDS));
+    throw error;
+  };
+}
 
 /**
  * Answer a stored file as an attachment, streamed rather than read into memory first. Content-Length

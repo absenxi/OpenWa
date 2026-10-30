@@ -763,7 +763,8 @@ export class BaileysLifecycle {
       this.cancelPairingWindow();
       this.qrCode = null;
       this.phoneNumber = this.host.extractPhone(this.sock?.user?.id);
-      this.pushName = this.sock?.user?.name ?? null;
+      // The live credentials: sock.user is the copy of creds.me made when the socket was built.
+      this.pushName = this.sock?.authState?.creds?.me?.name ?? null;
       // The account's own lid<->phone pair. Baileys stores it in its own mapping without emitting
       // lid-mapping.update, and an account whose only traffic is API sends never sees it on a message
       // key either, so a lid-addressed group's `<lid>@lid` row for the account stayed unresolved and

@@ -217,9 +217,12 @@ export class GroupService {
    *
    * The member label uses it too: Baileys relays that label as a message to whatever jid it is given, so
    * a 1:1 id would send a group protocol message to a person.
+   *
+   * One `@` only: the kind is read after the last one, while Baileys reads the domain after the first, so
+   * `628123456789@c.us@g.us` passed here as a group and Baileys relayed it on its 1:1 path.
    */
   private assertGroupId(groupId: string): void {
-    if (chatKind(groupId) !== 'group') {
+    if (chatKind(groupId) !== 'group' || groupId.indexOf('@') !== groupId.lastIndexOf('@')) {
       throw new BadRequestException(`${groupId} is not a group id`);
     }
   }

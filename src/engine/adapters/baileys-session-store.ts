@@ -228,6 +228,11 @@ export class BaileysSessionStore {
    */
   private readonly ephemeralByChat: LruMap<string, number>;
   /**
+   * When the timer {@link ephemeralByChat} holds was set, as the chat update that applied it reported it
+   * (`ephemeralSettingTimestamp`, epoch seconds), under the same keys. Kept across a deletion like the timer.
+   */
+  private readonly timerSetAt: LruMap<string, number>;
+  /**
    * The chat deletions this process saw, under every spelling. The chat-state store writes the mark on its
    * own queue, so a message recorded before the write lands is judged against this copy, and a mark a newer
    * message cleared stays cleared here while the store's forget is still on its way.
@@ -268,6 +273,7 @@ export class BaileysSessionStore {
     this.lidToPn = new LruMap(maxEntries);
     // Double-keyed (raw + neutral JID per chat), so it needs two slots per chat to cover the same span.
     this.ephemeralByChat = new LruMap(maxEntries * 2);
+    this.timerSetAt = new LruMap(maxEntries * 2);
     this.deletionMarks = new LruMap(maxEntries);
     this.heldChatUpdates = new LruMap(maxEntries);
   }
@@ -328,7 +334,8 @@ export class BaileysSessionStore {
   }
 
   upsertChats(records: Partial<Chat>[] = []): void {
-    for (const r of records) {
+    for (const record of records) {
+      const r = this.withoutStaleTimer(record);
       if (!r.id) {
         continue;
       }
@@ -337,6 +344,9 @@ export class BaileysSessionStore {
       // an archive or pin made ahead of it. Kept, either would show on the chat a later message re-creates.
       const timestamp = this.toUnixSeconds(r.conversationTimestamp);
       if (this.stillDeleted(r.id, timestamp)) {
+        // Except its disappearing timer, which WhatsApp keeps across a deletion, as this store does: a timer
+        // turned off while the chat is deleted comes with no message. A held update's timer is applied now.
+        this.applyChatTimer(r.id, r);
         // The update of a message from the deletion's own second waits for that message's record.
         const messageId = r.messages?.[0]?.message?.key?.id;
         const mark = messageId ? this.deletionMark(this.markKeys(r.id)) : undefined;
@@ -348,24 +358,76 @@ export class BaileysSessionStore {
       const existing = this.chats.get(r.id) ?? { id: r.id };
       this.chats.set(r.id, { ...existing, ...r });
       this.persistChatState(r.id, r);
-      // A timer the chat itself reports (Baileys emits the EPHEMERAL_SETTING change as chats.update) is
-      // newer than the one learned from messages, and turning the timer off produces no stamped message
-      // that could clear it. Own key only, as in persistChatState: history-sync proto defaults are not news.
-      // Every twin: own sends cache the timer under the phone spelling of a chat Baileys keys by its lid,
-      // and a twin chat record would otherwise serve the old timer from the getEphemeralExpiration fallback.
-      if (Object.hasOwn(r, 'ephemeralExpiration')) {
-        const exp = r.ephemeralExpiration;
-        for (const key of new Set(this.chatTwins(r.id).flatMap(k => [k, this.toNeutralJid(k)]))) {
-          if (typeof exp === 'number' && exp > 0) {
-            this.ephemeralByChat.set(key, exp);
-          } else {
-            this.ephemeralByChat.delete(key);
-          }
-          const twin = key === r.id ? undefined : this.chats.get(key);
-          if (twin) this.chats.set(key, { ...twin, ephemeralExpiration: exp });
-        }
-      }
+      this.applyChatTimer(r.id, r);
     }
+  }
+
+  /**
+   * A timer the chat itself reports (Baileys emits the EPHEMERAL_SETTING change as chats.update) is
+   * newer than the one learned from messages, and turning the timer off produces no stamped message
+   * that could clear it. Own key only, as in persistChatState: history-sync proto defaults are not news.
+   * Every twin: own sends cache the timer under the phone spelling of a chat Baileys keys by its lid,
+   * and a twin chat record would otherwise serve the old timer from the getEphemeralExpiration fallback.
+   * Only the cache and twin records that exist are written: no record is created and nothing persisted.
+   */
+  private applyChatTimer(chatId: string, r: Partial<Chat>): void {
+    if (!Object.hasOwn(r, 'ephemeralExpiration')) return;
+    const exp = r.ephemeralExpiration;
+    const setAt = this.toUnixSeconds(r.ephemeralSettingTimestamp);
+    for (const key of this.timerKeys(chatId)) {
+      if (typeof exp === 'number' && exp > 0) {
+        this.ephemeralByChat.set(key, exp);
+      } else {
+        this.ephemeralByChat.delete(key);
+      }
+      if (setAt) this.timerSetAt.set(key, setAt);
+      const twin = key === chatId ? undefined : this.chats.get(key);
+      if (twin) this.chats.set(key, { ...twin, ephemeralExpiration: exp });
+    }
+  }
+
+  /**
+   * The keys a chat's timer is cached, compared and read under: every twin, raw and neutral. A phone the cache
+   * maps to more than one lid (a recycled number) belongs to no one chat, and through it one holder's timer would
+   * be read, compared and written as the other's, so then only the chat's own spellings are used.
+   */
+  private timerKeys(chatId: string): Set<string> {
+    const twins = this.chatTwins(chatId);
+    const own = parseWaId(chatId);
+    const keys = this.phoneOfManyLids(twins)
+      ? twins.filter(k => {
+          const id = parseWaId(k);
+          return id.kind === own.kind && id.userPart === own.userPart;
+        })
+      : twins;
+    return new Set(keys.flatMap(k => [k, this.toNeutralJid(k)]));
+  }
+
+  /** Whether the cache maps the phone among a chat's twins (its own number, or its lid's) to more than one lid. */
+  private phoneOfManyLids(twins: string[]): boolean {
+    const phone = twins.find(k => parseWaId(k).kind === 'user');
+    if (!phone) return false;
+    const lids = new Set(
+      this.chatTwins(phone)
+        .map(k => parseWaId(k))
+        .flatMap(id => (id.kind === 'lid' ? [id.userPart] : [])),
+    );
+    return lids.size > 1;
+  }
+
+  /**
+   * The update without its timer when it reports a setting older than the one applied for the chat: a history
+   * record snapshotted before the timer changed can arrive after the change, also once the chat is deleted. An
+   * update that names no setting time is taken as before. A copy, so the library's event payload is untouched.
+   */
+  private withoutStaleTimer(r: Partial<Chat>): Partial<Chat> {
+    const setAt = this.toUnixSeconds(r.ephemeralSettingTimestamp);
+    if (!r.id || !setAt || !Object.hasOwn(r, 'ephemeralExpiration')) return r;
+    if (![...this.timerKeys(r.id)].some(k => (this.timerSetAt.get(k) ?? 0) > setAt)) return r;
+    const kept = { ...r };
+    delete kept.ephemeralExpiration;
+    delete kept.ephemeralSettingTimestamp;
+    return kept;
   }
 
   /**
@@ -603,7 +665,7 @@ export class BaileysSessionStore {
       const { mark, chatId, update } = held;
       if (mark.cleared && order > mark.order && this.deletionMark(this.markKeys(chatId)) === mark) {
         if (this.chatTwins(chatId).some(k => this.chats.has(k))) {
-          this.chats.set(chatId, { ...update, ...this.chats.get(chatId) });
+          this.chats.set(chatId, { ...this.withoutStaleTimer(update), ...this.chats.get(chatId) });
         } else {
           this.upsertChats([update]);
         }
@@ -930,9 +992,13 @@ export class BaileysSessionStore {
    * disappear. Folds a neutral `@c.us` id to the engine dialect first, like the other chat lookups.
    */
   getEphemeralExpiration(chatId: string): number | undefined {
+    // A phone the cache maps to more than one lid (a recycled number) names no one chat, so a send addressed to
+    // it alone carries no timer: what its keys hold was written for whichever holder came first.
+    const shared = this.phoneOfManyLids(this.chatTwins(chatId));
+    if (shared && parseWaId(chatId).kind === 'user') return undefined;
     // Prefer the timer learned from inbound messages (reliably present); try the raw, engine, and
     // neutral keys so an @lid-keyed entry and a phone-dialect send target resolve to the same value.
-    const fromMessage = [chatId, this.toEngineJid(chatId), ...this.chatTwins(chatId)]
+    const fromMessage = [chatId, this.toEngineJid(chatId), ...this.timerKeys(chatId)]
       .map(key => this.ephemeralByChat.get(key))
       .find(value => typeof value === 'number' && value > 0);
     if (typeof fromMessage === 'number' && fromMessage > 0) {
@@ -943,7 +1009,7 @@ export class BaileysSessionStore {
       this.chats.get(chatId) ??
       this.chats.get(this.toEngineJid(chatId)) ??
       this.chats.get(this.toNeutralJid(chatId)) ??
-      this.chats.get(this.chatKey(chatId));
+      (shared ? undefined : this.chats.get(this.chatKey(chatId)));
     const exp = chat?.ephemeralExpiration;
     return typeof exp === 'number' && exp > 0 ? exp : undefined;
   }

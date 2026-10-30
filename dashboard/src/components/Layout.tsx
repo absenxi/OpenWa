@@ -65,9 +65,13 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
   const { theme, toggleTheme } = useTheme();
   const ThemeIcon = themeIcons[theme];
   const themeLabel = t(`theme.${theme}`);
-  // toggleTheme cycles light, dark, system; the button names the state a click selects.
-  const nextThemeLabel = t('theme.toggleTo', {
-    value: t(`theme.${theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'}`),
+  // toggleTheme cycles light, dark, system. The button's name starts with the mode it shows, the words a voice user
+  // says to press it, then names the mode a click selects.
+  const themeButtonName = t('common.joinedName', {
+    first: themeLabel,
+    second: t('theme.toggleTo', {
+      value: t(`theme.${theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'}`),
+    }),
   });
 
   const { scoped } = useRole();
@@ -191,6 +195,7 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
 
   const currentLang = resolveSupportedLanguage(i18n.resolvedLanguage || i18n.language);
   const languageLabel = languageOptions.find(option => option.value === currentLang)?.compactLabel ?? 'EN';
+  const languageButtonName = t('common.joinedName', { first: languageLabel, second: t('common.changeLanguage') });
   const changeLanguage = (language: SupportedLanguage) => {
     setIsLanguageMenuOpen(false);
     void i18n.changeLanguage(language);
@@ -292,8 +297,8 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
             <button
               className="theme-toggle-btn"
               onClick={() => setIsLanguageMenuOpen(open => !open)}
-              title={t('common.language')}
-              aria-label={t('common.language')}
+              title={languageButtonName}
+              aria-label={languageButtonName}
               aria-haspopup="menu"
               aria-expanded={isLanguageMenuOpen}
             >
@@ -320,8 +325,8 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
             <button
               className="theme-toggle-btn"
               onClick={toggleTheme}
-              title={nextThemeLabel}
-              aria-label={nextThemeLabel}
+              title={themeButtonName}
+              aria-label={themeButtonName}
             >
               <span className="appearance-button-cue" aria-hidden="true">
                 <ThemeIcon size={16} />

@@ -351,6 +351,16 @@ export class BaileysMessaging {
     return confirmedWrite(work, this.queryBudgetMs, operation);
   }
 
+  /**
+   * Baileys sets no deadline on a media upload. A direct session uploads through Node's global agent, whose
+   * 5 s idle timeout ends a stalled upload; a session proxy's agent has none, so a proxy that holds the tunnel
+   * open and stops answering kept the send waiting for good. A request timeout replaces the agent's, so only a
+   * proxied session gets one: it would lengthen the direct session's bound.
+   */
+  private uploadTimeoutMs(): number | undefined {
+    return this.host.sessionProxyUrl() ? this.queryBudgetMs : undefined;
+  }
+
   /** Post-ensureReady socket handle. */
   private sock(expected?: WASocket): WASocket {
     const socket = this.host.getSocket();
@@ -389,7 +399,11 @@ export class BaileysMessaging {
     try {
       const { imageMessage } = await lib.prepareWAMessageMedia(
         { image },
-        { upload: this.sock().waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+        {
+          upload: this.sock().waUploadToServer,
+          mediaTypeOverride: 'thumbnail-link',
+          mediaUploadTimeoutMs: this.uploadTimeoutMs(),
+        },
       );
       if (!imageMessage) return {};
       return {
@@ -519,12 +533,14 @@ export class BaileysMessaging {
    * failure surfaces instead of leaving the account silently online (#871).
    *
    * Baileys resolves this call without sending anything when `creds.me.name` is unset (it logs
-   * "no name present, ignoring presence update request" and returns). `sock.user` is that cred.
-   * Refusing here keeps PUT /presence from reporting success for an update that never left.
+   * "no name present, ignoring presence update request" and returns). It reads the live credentials,
+   * so this does too: `sock.user` is a copy of creds.me made when the socket was built, and a newly
+   * linked account's name syncs after that. Refusing here keeps PUT /presence from reporting success
+   * for an update that never left.
    */
   async setOnlinePresence(available: boolean): Promise<void> {
     this.host.ensureReady();
-    if (!this.sock().user?.name) {
+    if (!this.sock().authState?.creds?.me?.name) {
       throw new EngineNotReadyError(
         'The account push name is not available yet, so this presence update would be ignored. Retry once the session has synced its profile name.',
       );
@@ -1044,8 +1060,9 @@ export class BaileysMessaging {
    *
    * A send that fails after a stop or logout has torn its socket down is not ready (409), the same as
    * one interrupted before it reached the socket; a failure on a socket still in place propagates. A swap
-   * found before sock.sendMessage is called sent nothing, so that 409 carries markNothingSent. The send is
-   * not moved to the new socket: a logout followed by a relink to another account looks the same.
+   * found before sock.sendMessage is called sent nothing, so that 409 carries markNothingSent, as does the 400
+   * for a recipient WhatsApp reports unregistered. The send is not moved to the new socket: a logout followed
+   * by a relink to another account looks the same.
    *
    * `content` may be a function, for content that costs work to build (a link preview image): it is
    * called after the recipient check, and its own errors are not send refusals.
@@ -1066,15 +1083,18 @@ export class BaileysMessaging {
         throw new EngineNotSentError(`WhatsApp could not check the recipient before send: ${String(error)}`);
       }
       if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
-      if (!numberId) throw new BadRequestException(`WhatsApp reports recipient ${jid} is not registered`);
+      if (!numberId)
+        throw markNothingSent(new BadRequestException(`WhatsApp reports recipient ${jid} is not registered`));
       const canonical = this.host.toEngineJid(numberId);
       if (canonical !== jid) jid = await this.toDeliverableJid(numberId);
     }
     const message = typeof content === 'function' ? await content() : content;
     if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
+    const mediaUploadTimeoutMs = this.uploadTimeoutMs();
+    const sendOptions = mediaUploadTimeoutMs ? { ...options, mediaUploadTimeoutMs } : options;
     let sent: WAMessage | undefined;
     try {
-      sent = options ? await sock.sendMessage(jid, message, options) : await sock.sendMessage(jid, message);
+      sent = sendOptions ? await sock.sendMessage(jid, message, sendOptions) : await sock.sendMessage(jid, message);
     } catch (error) {
       if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
       throw mapSendRefusal(error);
@@ -1134,7 +1154,8 @@ export class BaileysMessaging {
     const found = await this.host.getStoredMessage(messageId);
     const deleted = !found?.message || this.host.wasDeletedForEveryone(messageId);
     if (!found?.key || (deleted && !allowDeleted)) {
-      throw new MessageNotFoundError(messageId);
+      // Every caller looks the message up before it writes anything, so nothing was sent.
+      throw markNothingSent(new MessageNotFoundError(messageId));
     }
     const edited = deleted ? undefined : this.host.pendingEditOf(messageId, found.key);
     if (edited === undefined) return found;
@@ -1162,7 +1183,8 @@ export class BaileysMessaging {
    * not-found here, not a cross-chat write (a pin sent into chat A referencing chat B's message, or
    * a star indexed under the wrong conversation, would report success). Both sides are neutralized
    * so @c.us/@s.whatsapp.net (and a known lid<->pn twin) compare equal, and a received broadcast-list
-   * message is found under the sender chat it is reported in.
+   * message is found under the sender chat it is reported in. Every caller checks before it writes, so
+   * the not-found carries markNothingSent (the lid query it may run writes no message).
    */
   private async assertStoredInChat(
     target: WAMessage,
@@ -1196,7 +1218,7 @@ export class BaileysMessaging {
         }
       }
     }
-    throw new MessageNotFoundError(messageId, chatId);
+    throw markNothingSent(new MessageNotFoundError(messageId, chatId));
   }
 
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {

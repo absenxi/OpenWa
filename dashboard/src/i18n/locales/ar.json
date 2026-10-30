@@ -46,6 +46,8 @@
     "optional": "اختياري",
     "fieldTooLong": "الحد الأقصى {{max}} حرفًا (الآن {{count}}).",
     "language": "اللغة",
+    "changeLanguage": "تغيير اللغة",
+    "joinedName": "{{first}}، {{second}}",
     "back": "رجوع",
     "next": "التالي",
     "previous": "السابق",

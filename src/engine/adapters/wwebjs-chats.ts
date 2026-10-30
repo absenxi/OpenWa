@@ -3,6 +3,7 @@ import * as wwebjs from 'whatsapp-web.js';
 import { MessageTypes, type Chat, type Client } from 'whatsapp-web.js';
 import { ChatSummary, ChatState } from '../interfaces/whatsapp-engine.interface';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { chatKind, isChannelJid } from '../identity/wa-id';
 import { WwebjsMessaging } from './wwebjs-messaging';
 import { type WwebjsEngineHost, rethrowIfNavigation } from './wwebjs-host';
@@ -102,6 +103,8 @@ function rethrowTransportFailure(
   activity: string,
   timedOutMessage = `WhatsApp Web did not answer in time while ${activity}`,
 ): void {
+  // A session that stopped during the lookup is the retryable 409, never a `false` refusal.
+  if (error instanceof EngineNotReadyError) throw error;
   rethrowIfNavigation(host, error);
   if (host.isPageTransportError(error)) {
     host.reportIfPageTransportError(error, context);
@@ -223,6 +226,8 @@ export class WwebjsChats {
     this.host.ensureReady();
     try {
       const chat = await this.client().getChatById(chatId);
+      // The chat acts through its own client, which getClient's readiness check never sees again.
+      this.host.ensureReady();
       return await chat.sendSeen();
     } catch (error) {
       // A dead page is a 503 and an early death signal, not an opaque `false` (see rethrowTransportFailure).
@@ -239,6 +244,7 @@ export class WwebjsChats {
       // resulting TypeError lands in the catch below as the same `false` the injected helper
       // returns for a chat it cannot find. Same shape as sendSeen/archiveChat above.
       const chat = await this.client().getChatById(chatId);
+      this.host.ensureReady();
       return await chat.clearMessages();
     } catch (error) {
       // A dead page is a 503 and an early death signal, not an opaque `false` (see rethrowTransportFailure).
@@ -365,6 +371,7 @@ export class WwebjsChats {
     }
     try {
       const chat = await this.client().getChatById(chatId);
+      this.host.ensureReady();
       // Chat.markUnread() resolves void, so synthesize the boolean from a clean call.
       await chat.markUnread();
       return true;
@@ -385,6 +392,7 @@ export class WwebjsChats {
     }
     try {
       const chat = await this.client().getChatById(chatId);
+      this.host.ensureReady();
       return await chat.delete();
     } catch (error) {
       // A dead page is a 503 and an early death signal, not an opaque `false` (see rethrowTransportFailure).

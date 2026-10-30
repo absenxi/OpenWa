@@ -245,7 +245,11 @@ different depths — which is what the optional marker exists to allow. wwjs rac
 `Client.getState()` round trip against a 10s timeout, because a wedged page keeps reporting
 CONNECTED. Baileys returns a local check (`status === READY && sock != null`), because its keepalive
 already emits a close event within ~35s. So a wedged wwjs page is caught here; a wedged Baileys
-socket is caught by the transport instead. No REST route: the session watchdog polls it.
+socket is caught by the transport instead. No REST route: the session watchdog polls it. One wwjs
+page it cannot tell from a healthy one: a reload whose re-inject loads the helpers but then fails to
+attach the event listeners emits no `ready`, so the probe finds the helpers and the session stays
+`READY`, sends still working, while inbound messages can stop reaching the gateway until the session
+is restarted.
 
 ### 29.4.2 Sending messages
 
@@ -988,7 +992,7 @@ adapter boundary — none silently stubs.
   Baileys applies the write locally and the deleted chat would be listed again. Such a chat is not
   listed, and the four writes and a `sendSeen` without message ids resolve `false`, until a newer
   message re-creates it. A deletion synced on a reconnect is dated when it arrives, so a message
-  delivered in the same reconnect counts as older. A chat id not spelled the way the engine keys chats (`<id>@g.us`,
+  delivered in the same reconnect counts as older. A message whose second is earlier than the gateway's deletion date, because the gateway's clock runs ahead or a deletion made on the phone reaches it late, counts as older too. A send keeps the chat's disappearing timer; for a phone the gateway maps to more than one lid (a reassigned number), a send addressed to that phone alone goes without one, since the timer cannot be told apart between the two holders. A chat id not spelled the way the engine keys chats (`<id>@g.us`,
   `<lid>@lid` or a phone jid, lowercase, with no device suffix), such as `120363@G.US` or a bare
   number, is served only by a message in memory: without one, the four writes and a `sendSeen` without
   message ids resolve `false`. With no usable message, clear and delete resolve `false`, and archive

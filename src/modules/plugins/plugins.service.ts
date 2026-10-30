@@ -259,10 +259,11 @@ export class PluginsService {
 
     try {
       // The dashboard PUTs the whole (redacted) config back, so a sentinel secret means "unchanged":
-      // restore the stored value instead of overwriting the real secret with the mask.
-      const merged = restoreSecretConfig(config, plugin.config, plugin.manifest.configSchema, {
-        mergedOverStored: true,
-      });
+      // restore the stored value instead of overwriting the real secret with the mask. From the stored
+      // config, not the runtime one: a built-in's runtime config carries its env-derived settings, and
+      // restoring a mask from those would store them over every later .env change.
+      const stored = this.pluginLoader.getRegistryEntry(id)?.config ?? {};
+      const merged = restoreSecretConfig(config, stored, plugin.manifest.configSchema, { mergedOverStored: true });
       this.pluginLoader.updatePluginConfig(id, merged, { mustPersist: true });
       return { success: true, message: `Plugin ${id} configuration updated` };
     } catch (error) {

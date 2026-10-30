@@ -916,7 +916,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         this.startReservations.delete(id);
         // No start of the session runs now to look at the stop requests that have returned.
         this.dropEndedStops(id);
-        if (this.releaseOwed.delete(id)) await this.releaseUnlessEngineActive(id);
+        if (this.releaseOwed.delete(id)) await this.releaseUnlessEngineActive(id, undefined, { correctStatus: true });
       }
     }
   }
@@ -941,18 +941,18 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       session = await this.startWithTransientRetry(id, explicit, stopRequestsBefore);
     } catch (error) {
       await this.keepDownIfStoppedDuringStart(id, explicit, stopRequestsBefore);
-      // A failed or refused start must not leave the claim pinned here — the heartbeat would renew
-      // it and the session could never be started anywhere else. Released only when nothing is
-      // actually alive locally: an "already starting/started" refusal means this node genuinely
-      // runs the engine, and releasing then would invite a peer to open a second connection.
-      await this.releaseUnlessEngineActive(id);
+      // A failed or refused start must not leave the claim here: until its lease lapsed, no other node
+      // could start the session. Released only when nothing is actually alive locally, and then with
+      // the status corrected: an "already starting/started" refusal means this node genuinely runs
+      // the engine, and releasing then would invite a peer to open a second connection.
+      await this.releaseUnlessEngineActive(id, undefined, { correctStatus: true });
       throw error;
     }
     await this.keepDownIfStoppedDuringStart(id, explicit, stopRequestsBefore);
     // A start retired by a concurrent stop() resolves normally but leaves no engine, and that stop
     // skipped its release while this start still held the session. Hand the claim back here, or the
     // row keeps naming this node until the lease lapses and a peer adopts the stopped session.
-    await this.releaseUnlessEngineActive(id);
+    await this.releaseUnlessEngineActive(id, undefined, { correctStatus: true });
     return session;
   }
 
@@ -1274,9 +1274,15 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
   /**
    * Hand the claim back unless something still runs here (engine, in-flight start, pending reconnect,
-   * delete in flight).
+   * delete in flight). A start's release (`correctStatus`) then corrects the status of the row it
+   * released: nothing runs it here, and a row no node holds is never revisited by the lapsed-claim
+   * correction or the takeover sweep, so a READY a vanished node left on it would stand until a boot.
    */
-  private async releaseUnlessEngineActive(id: string, ownsClaim?: () => boolean): Promise<void> {
+  private async releaseUnlessEngineActive(
+    id: string,
+    ownsClaim?: () => boolean,
+    { correctStatus = false } = {},
+  ): Promise<void> {
     if (!this.ownership || this.engineLifecycle.isEngineActive(id)) {
       return;
     }
@@ -1288,6 +1294,29 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     }
     this.releaseOwed.delete(id);
     await this.releaseClaimBestEffort(id, ownsClaim);
+    if (correctStatus) await this.disconnectReleasedRow(id);
+  }
+
+  /**
+   * Written after the release and on an unclaimed row only: any claim sets `nodeId`, so a row a peer or
+   * a later start has claimed since keeps the status its start gives it, and a release that failed
+   * leaves the row claimed, to lapse into the corrections that read claimed rows. Best-effort, like the
+   * release: the start's own outcome is the answer.
+   */
+  private async disconnectReleasedRow(id: string): Promise<void> {
+    try {
+      const { affected } = await this.sessionRepository.update(
+        { id, nodeId: IsNull(), status: In(ACTIVE_STATUSES) },
+        { status: SessionStatus.DISCONNECTED },
+      );
+      if (affected) this.engineLifecycle.announceStatus(id, SessionStatus.DISCONNECTED);
+    } catch (error) {
+      this.logger.warn(`Could not mark session ${id} disconnected after its start left no engine`, {
+        sessionId: id,
+        action: 'session_release_status_failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

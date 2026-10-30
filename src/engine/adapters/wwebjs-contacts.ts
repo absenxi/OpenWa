@@ -334,6 +334,8 @@ export class WwebjsContacts {
     this.host.ensureReady();
     await withPage(this.host, 'blockContact', async () => {
       const contact = await this.client().getContactById(contactId);
+      // The contact acts through its own client, which getClient's readiness check never sees again.
+      this.host.ensureReady();
       await contact.block();
     });
     this.host.logger.debug('Blocked contact', { contactId });
@@ -356,6 +358,7 @@ export class WwebjsContacts {
     this.host.ensureReady();
     await withPage(this.host, 'unblockContact', async () => {
       const contact = await this.client().getContactById(contactId);
+      this.host.ensureReady();
       await contact.unblock();
     });
     this.host.logger.debug('Unblocked contact', { contactId });

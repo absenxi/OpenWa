@@ -1026,10 +1026,14 @@ npm run migration:show
 
 # Revert last migration
 npm run migration:revert
-
-# Regenerate migration
-npm run migration:generate --name=FixMigration
 ```
+
+Then fix the failing migration by hand so it skips what already exists, as the idempotent migrations
+in `src/database/migrations/` do, and run `npm run migration:run` again. Do not regenerate it with
+`migration:generate`: on PostgreSQL the command stops before it writes anything (the generated
+`messages.body_ts` column sends TypeORM to a `typeorm_metadata` table no migration creates), and on
+SQLite it writes the known table-rebuild drift pinned in `migration-drift.spec.ts`, in SQLite DDL
+that the PostgreSQL boot would then run.
 
 ### TypeScript/NestJS Issues
 

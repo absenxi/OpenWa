@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Plus,
@@ -85,6 +85,19 @@ function FilterBadge({ filters }: { filters: WebhookFilters }) {
       left: `${Math.min(Math.max(margin, anchor.left), window.innerWidth - width - margin)}px`,
     });
   }, [anchor]);
+
+  // Escape puts the popover away without moving the pointer or focus, whether hover or focus opened it.
+  const isOpen = anchor !== null;
+  useEffect(() => {
+    if (!isOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
+      event.preventDefault();
+      setAnchor(null);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [isOpen]);
 
   return (
     <span

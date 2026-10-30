@@ -1,6 +1,6 @@
 # rmyndharis-openwa
 
-This document describes `main`. `groups.set_member_label` and the `match` key of the search query are unreleased additions after SDK 0.7.0 and require the corresponding server changes after OpenWA 0.26.0. Send idempotency, webhook failure redrive, message-window filters, poll choices, last-message types, and the `event.response` webhook event name require OpenWA 0.25.0 or later. The `message.receipt` and `poll.vote` webhook event names require OpenWA 0.26.0 or later.
+This document describes `main`. `groups.set_member_label`, the `match` key of the search query, and the `thumbnailUrl` and `thumbnailBase64` keys of `CustomLinkPreview` are unreleased additions after SDK 0.7.0 and require the corresponding server changes after OpenWA 0.26.0. Send idempotency, webhook failure redrive, message-window filters, poll choices, last-message types, and the `event.response` webhook event name require OpenWA 0.25.0 or later. The `message.receipt` and `poll.vote` webhook event names require OpenWA 0.26.0 or later.
 
 Official Python SDK for [OpenWA](https://github.com/rmyndharis/OpenWA), the open-source WhatsApp API Gateway. OpenWA is an independent project, not affiliated with or endorsed by WhatsApp or Meta.
 
@@ -94,13 +94,15 @@ the failure breaker's cooldown (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by
 run of send failures, otherwise up to the next UTC day. Every API error also exposes the response
 `.headers`. A 503 does not always prove a write was never carried out: when WhatsApp timed out, the
 change may still have been applied, so re-read the state before repeating it. A throttle on a send
-or a single write is the exception: it was turned away before it ran, so nothing was sent or
-applied, and a keyed send frees its `Idempotency-Key`. A group settings update with several fields
-applies them one at a time, so a 503 on a later field, a throttle included, leaves the earlier ones
-applied; its message lists them after `already applied:`, so re-read the settings before retrying,
-or send one field per request. In a routed deployment a forward that fails before reaching the owner
-node answers 503, one that fails after the request reached it answers 502 or 504, and a 503 from the
-owner itself is relayed unchanged.
+or a single write was turned away before it ran, so nothing was sent or applied; a send also sent
+nothing when its recipient lookup failed, its connection closed before the message was written, or
+its media or preview image URL could not be fetched through the session's proxy. Each of these frees
+a keyed send's `Idempotency-Key`. A group settings update with several fields applies them one at a
+time, so a 503 on a later field, a throttle included, leaves the earlier ones applied; its message
+lists them after `already applied:`, so re-read the settings before retrying, or send one field per
+request. In a routed deployment a forward that fails before reaching the owner node answers 503, one
+that fails after the request reached it answers 502 or 504, and a 503 from the owner itself is
+relayed unchanged.
 
 ```python
 from openwa import OpenWANotFoundError

@@ -412,6 +412,19 @@ test('the session list renders, and action buttons gate on engineLoaded rather t
   within(qrCard).getByRole('button', { name: 'Proxy' });
 });
 
+// The status filter shows the option picked; its name says what it filters as well, keeping the shown words.
+test('the status filter is named for what it filters and for the status it shows', async () => {
+  const { screen, fireEvent } = rtl;
+  resetFetchCalls();
+  renderSessions();
+  await screen.findByText('new-device');
+
+  const trigger = screen.getByRole('button', { name: 'Status, All Status' });
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole('option', { name: 'Inactive' }));
+  assert.equal(trigger.getAttribute('aria-label'), 'Status, Inactive');
+});
+
 test('a linked session that is reconnecting keeps its identity rows, not the pairing placeholder', async () => {
   const { screen, within } = rtl;
   resetFetchCalls();

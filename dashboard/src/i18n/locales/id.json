@@ -38,6 +38,8 @@
     "optional": "opsional",
     "fieldTooLong": "Dibatasi {{max}} karakter (saat ini {{count}}).",
     "language": "Bahasa",
+    "changeLanguage": "Ganti bahasa",
+    "joinedName": "{{first}}, {{second}}",
     "back": "Kembali",
     "next": "Selanjutnya",
     "previous": "Sebelumnya",

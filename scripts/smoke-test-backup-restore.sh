@@ -100,10 +100,14 @@
 #   (av) a PostgreSQL POSTGRES_SCHEMA other than public, from the environment, ./.env or .env.generated, is
 #       dumped alone with its search extensions, and pgcrypto only when it lives in that schema, behind a prelude
 #       that drops none of them with CASCADE, for the DATABASE_URL branch too, and named in database.schema; public
-#       keeps the whole-database dump; a name the app refuses, a pg_dump older than 14, or a failed pgcrypto probe
-#       stops the backup before it dumps anything; restore prints the schema load, with the extensions' owner and
+#       keeps the whole-database dump, and the scoped one creates its trigram index last, after the schema grants;
+#       a name the app refuses, a pg_dump older than 14, a failed pgcrypto probe, or a failed dump fails the
+#       backup, the first three before it dumps anything; restore prints the schema load, with the roles that can load
+#       it, the extensions' owner and
 #       the way past another deployment's trigram index, only for a marked archive, in one transaction either way,
 #       and refuses a marker naming an invalid schema
+#   (aw) restore stops before it writes anything when the dump opens with \restrict and the psql on PATH is too old
+#       to read it, and otherwise, with no psql on PATH too, names the psql versions the load needs
 #
 # Usage: ./scripts/smoke-test-backup-restore.sh
 # Requires: bash, tar, node (restore.sh path resolution). sqlite3 is optional (see (c) and (k)).
@@ -156,7 +160,7 @@ db_fingerprint() {
 # to shadow tar (simulating an incomplete archive) without touching the real scripts.
 populate_shim() {
   shim_dir="$1"
-  tools="env bash sh cp mv tar gzip mktemp date rm sed mkdir ls cat chmod grep printf uname dirname tr tail"
+  tools="env bash sh cp mv tar gzip mktemp date rm sed mkdir ls cat chmod grep printf uname dirname tr tail awk"
   if [ "${2:-}" = "with-sqlite3" ]; then
     tools="$tools sqlite3"
   fi
@@ -2934,6 +2938,15 @@ if [ "\$1" = --schema-only ]; then
 fi
 printf '%s|' "\$@" >"$AV/pg_dump-args"
 echo '-- dump'
+# In pg_dump's order: the trigram index, the schema grants, the closing \unrestrict. AV_QUOTE quotes the schema, as
+# pg_dump does a keyword.
+s=public
+[ "\$1" != -n ] || s="\$2"
+[ -z "\${AV_QUOTE:-}" ] || s="\"\$s\""
+echo "CREATE INDEX idx_messages_body_trgm ON \$s.messages USING gin (\$s.openwa_unaccent(body) \$s.gin_trgm_ops);"
+echo "GRANT ALL ON SCHEMA \$s TO app;"
+printf '%s\\n' '\\unrestrict key'
+[ -z "\${AV_DUMP_FAIL:-}" ] || exit 1
 EOF
 chmod +x "$AV/bin/pg_dump"
 # backup_av <.env content> <.env.generated content> [VAR=value...]: run a backup, leaving pg_dump's arguments in
@@ -2972,8 +2985,23 @@ if [ "$(tar -xzOf "$ARCHIVE_AV" ./database.schema)" != openwa_s ]; then
   fail "(av) the archive does not name the dumped schema in database.schema"
 fi
 AV_SQL="$(tar -xzOf "$ARCHIVE_AV" ./database.sql)"
-if ! grep -q "ALTER SCHEMA %I RENAME TO %I', 'openwa_s'" <<<"$AV_SQL" || [ "$(tail -n 1 <<<"$AV_SQL")" != '-- dump' ]; then
-  fail "(av) the schema dump does not start with the prelude that moves the schema aside: $AV_SQL"
+# The trigram index expression runs as the table owner, which pg_dump grants USAGE on a schema another role owns
+# only in its closing ACL pass, so the scoped dump creates that index last, quoted name or not; nothing else moves.
+AV_INDEX='CREATE INDEX idx_messages_body_trgm ON openwa_s.messages USING gin (openwa_s.openwa_unaccent(body) openwa_s.gin_trgm_ops);'
+if ! grep -q "ALTER SCHEMA %I RENAME TO %I', 'openwa_s'" <<<"$AV_SQL" ||
+  [ "$(tail -n 4 <<<"$AV_SQL" | tr '\n' '|')" != "-- dump|GRANT ALL ON SCHEMA openwa_s TO app;|\\unrestrict key|$AV_INDEX|" ]; then
+  fail "(av) the schema dump does not start with the prelude that moves the schema aside and end with its index: $AV_SQL"
+fi
+rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_QUOTE=1)"
+if [ "$rc" -ne 0 ] || [ "$(tar -xzOf "$(ls "$AV"/out/openwa-backup-*.tar.gz)" ./database.sql | tail -n 2 | tr '\n' '|')" != \
+  "\\unrestrict key|${AV_INDEX//openwa_s./\"openwa_s\".}|" ]; then
+  fail "(av) a quoted schema name kept the trigram index before the grants (rc $rc): $OUT_AV"
+fi
+# The dump goes through a filter, and a pg_dump that fails still fails the backup, leaving no archive.
+backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_DUMP_FAIL=1 >"$AV/rc"
+rc="$(cat "$AV/rc")"
+if [ "$rc" -eq 0 ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1; then
+  fail "(av) a scoped pg_dump that failed did not fail the backup (rc $rc): $OUT_AV"
 fi
 # Another schema may use the extensions that move aside: the prelude drops them without CASCADE, so that use fails
 # the load instead of going with them, and drops the copy's own trigram index first. Without pgcrypto in the
@@ -3054,6 +3082,11 @@ for AV_PUBLIC in 'POSTGRES_SCHEMA=public\n' 'POSTGRES_SCHEMA=\n' ''; do
 done
 ARCHIVE_AV_WHOLE="$AV/whole.tar.gz"
 cp "$(ls "$AV"/out/openwa-backup-*.tar.gz)" "$ARCHIVE_AV_WHOLE"
+# The whole-database dump is pg_dump's output as written, its trigram index included.
+if [ "$(tar -xzOf "$ARCHIVE_AV_WHOLE" ./database.sql | tr '\n' '|')" != \
+  "-- dump|${AV_INDEX//openwa_s/public}|GRANT ALL ON SCHEMA public TO app;|\\unrestrict key|" ]; then
+  fail "(av) the whole-database dump is not pg_dump's output as written: $(tar -xzOf "$ARCHIVE_AV_WHOLE" ./database.sql)"
+fi
 # A name the app refuses, which pg_dump would fold or read as a pattern, and a line the scripts cannot parse,
 # stop the backup before pg_dump starts.
 for AV_BAD in 'POSTGRES_SCHEMA=OpenWA\n' 'POSTGRES_SCHEMA=openwa?\n' 'POSTGRES_SCHEMA=pg_openwa\n' \
@@ -3076,11 +3109,13 @@ if ! grep -q 'dump of schema openwa_s (POSTGRES_SCHEMA) present' <<<"$OUT_AV" ||
 fi
 # Dropping extensions that live in the schema takes their owner, and another OpenWA deployment's trigram index on
 # them refuses the load until that index is dropped: the printed text names both, and pgcrypto, which the dump
-# carries only when it lived in the schema.
+# carries only when it lived in the schema. The dump gives the schema's objects to the app's role before it grants
+# that role CREATE on a schema another role owns, which only a superuser's load gets past: the text says so.
 if ! grep -q 'when pg_trgm and unaccent live in that schema, owns them' <<<"$OUT_AV" ||
   ! grep -q 'dump carries it, which it does only when pgcrypto lived in that schema' <<<"$OUT_AV" ||
-  ! grep -q 'drop that index and load again' <<<"$OUT_AV"; then
-  fail "(av) restore did not name the extensions' owner or the way past another deployment's trigram index: $OUT_AV"
+  ! grep -q 'drop that index and load again' <<<"$OUT_AV" ||
+  ! grep -q 'When another role owns the schema, only a superuser can' <<<"$OUT_AV"; then
+  fail "(av) restore did not name the owners the load needs or the way past another deployment's trigram index: $OUT_AV"
 fi
 restore_av "$ARCHIVE_AV_WHOLE"
 if ! grep -q 'load it into an EMPTY database' <<<"$OUT_AV" || grep -q 'dump of schema' <<<"$OUT_AV" ||
@@ -3101,6 +3136,62 @@ if [ "$rc" -eq 0 ] || [ -e "$AV/dst/data/main.sqlite" ] || ! grep -q "database.s
   fail "(av) a marker naming an invalid schema did not stop the restore (rc $rc): $OUT_AV"
 fi
 pass "(av) a non-public POSTGRES_SCHEMA is dumped alone with its extensions and restored into its own database"
+
+echo ""
+printf '%s\n' "==> (aw) a psql on PATH that cannot read the dump's \\restrict stops the restore before anything is written"
+# pg_dump from 13.22, 14.19, 15.14, 16.10 and 17.6 on opens a plain dump with \restrict, which an older psql, and every
+# 12, stops at with "invalid command \restrict", loading nothing. The psql shim reports AW_PSQL as its version.
+AW="$WORK/aw"
+mkdir -p "$AW/bin" "$AW/stage" "$AW/nopsql"
+cat >"$AW/bin/psql" <<'EOF'
+#!/bin/sh
+echo "psql (PostgreSQL) $AW_PSQL"
+EOF
+chmod +x "$AW/bin/psql"
+tar -xzf "$ARCHIVE_AV_WHOLE" -C "$AW/stage"
+{ printf '%s\n' '--' '-- PostgreSQL database dump' '--' '' '\restrict key' && cat "$AW/stage/database.sql"; } >"$AW/dump.sql"
+mv "$AW/dump.sql" "$AW/stage/database.sql"
+tar -czf "$AW/restricted.tar.gz" -C "$AW/stage" .
+# aw_restore <archive> <PATH> [VAR=value...]: a restore into an empty directory, its output left in OUT_AW and its
+# exit status in rc.
+aw_restore() {
+  rm -rf "$AW/dst" && mkdir -p "$AW/dst"
+  set +e
+  OUT_AW="$(cd "$AW/dst" && env "${@:3}" PATH="$2" "$RESTORE" "$1" 2>&1)"
+  rc=$?
+  set -e
+}
+AW_NEEDS='psql 13.22, 14.19, 15.14, 16.10, 17.6 or newer (no 12)'
+for AW_OLD in 12.22 13.21 14.18 15.13 16.9 17.5 9.6.24 'unknown build'; do
+  aw_restore "$AW/restricted.tar.gz" "$AW/bin:$PATH" AW_PSQL="$AW_OLD"
+  if [ "$rc" -eq 0 ] || [ -e "$AW/dst/data" ] ||
+    ! grep -qF "which this psql cannot read: psql (PostgreSQL) $AW_OLD" <<<"$OUT_AW" ||
+    ! grep -qF "the load needs $AW_NEEDS; nothing has been restored yet" <<<"$OUT_AW"; then
+    fail "(aw) psql $AW_OLD did not stop the restore before anything was written (rc $rc): $OUT_AW"
+  fi
+done
+# A psql that reads it, or none on PATH (the load may run elsewhere), restores and names the versions with the load.
+populate_shim "$AW/nopsql"
+for tool in node find basename printenv readlink; do
+  ln -sf "$(command -v "$tool")" "$AW/nopsql/$tool"
+done
+for AW_NEW in 13.22 14.19 15.14 16.10 17.6 18.0 '16.10 (Ubuntu 16.10-0ubuntu0.24.04.1)' 19devel none; do
+  if [ "$AW_NEW" = none ]; then
+    aw_restore "$AW/restricted.tar.gz" "$AW/nopsql"
+  else
+    aw_restore "$AW/restricted.tar.gz" "$AW/bin:$PATH" AW_PSQL="$AW_NEW"
+  fi
+  if [ "$rc" -ne 0 ] || [ ! -f "$AW/dst/data/main.sqlite" ] ||
+    ! grep -qF "(the load needs $AW_NEEDS: the dump opens with \\restrict" <<<"$OUT_AW"; then
+    fail "(aw) psql $AW_NEW did not restore the archive and name the versions its load needs (rc $rc): $OUT_AW"
+  fi
+done
+# A dump without \restrict, from an older pg_dump, loads with any psql.
+aw_restore "$ARCHIVE_AV_WHOLE" "$AW/bin:$PATH" AW_PSQL=12.22
+if [ "$rc" -ne 0 ] || [ ! -f "$AW/dst/data/main.sqlite" ] || grep -q 'the load needs' <<<"$OUT_AW"; then
+  fail "(aw) a dump without \\restrict was refused or named a psql it does not need (rc $rc): $OUT_AW"
+fi
+pass "(aw) restore refuses a psql that cannot read the dump's \\restrict and names the versions that can"
 
 echo ""
 echo "All smoke tests passed!"

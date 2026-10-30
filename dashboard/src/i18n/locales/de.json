@@ -38,6 +38,8 @@
     "optional": "optional",
     "fieldTooLong": "Auf {{max}} Zeichen begrenzt (aktuell {{count}}).",
     "language": "Sprache",
+    "changeLanguage": "Sprache ändern",
+    "joinedName": "{{first}}, {{second}}",
     "back": "Zurück",
     "next": "Weiter",
     "previous": "Zurück",
@@ -1009,7 +1011,7 @@
     },
     "sendFailed": "Nachricht konnte nicht gesendet werden",
     "notOnWhatsApp": "Diese Nummer ist nicht bei WhatsApp registriert",
-    "tooLong": "Mehr als {{max}} Ziffern sind keine einzelne Telefonnummer. Geben Sie eine Nummer ein.",
+    "tooLong": "Mehr als {{max}} Ziffern sind keine einzelne Telefonnummer. Gib eine Nummer ein.",
     "batch": {
       "status": {
         "pending": "Ausstehend",
@@ -1046,7 +1048,7 @@
       "phonePlaceholder": "z. B. 919876543210 oder 6281234567890",
       "check": "Prüfen",
       "checking": "Wird geprüft...",
-      "tooLong": "Mehr als {{max}} Ziffern sind keine einzelne Telefonnummer. Prüfen Sie jeweils eine Nummer.",
+      "tooLong": "Mehr als {{max}} Ziffern sind keine einzelne Telefonnummer. Prüfe jeweils eine Nummer.",
       "autoPrefix": "<strong>+91</strong> bei 10-stelligen Nummern automatisch voranstellen (12-stellige Nummern bleiben unverändert)",
       "silent": "<strong>Völlig unbemerkt:</strong> Diese Abfrage geht direkt an das Registrierungsverzeichnis von WhatsApp. Der Kontakt erhält keine Benachrichtigung, keinen Ton und keine Nachricht.",
       "resultTitle": "Prüfergebnis",

@@ -348,7 +348,7 @@ test('a severity filter that matches nothing says no logs exist, not that this p
   const { screen, fireEvent } = rtl;
   renderLogs();
   await screen.findByText('infra.restart');
-  fireEvent.click(screen.getByRole('button', { name: 'All Severities' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Severity, All Severities' }));
   fireEvent.click(screen.getByRole('option', { name: 'Error' }));
   await screen.findByText('No logs match these filters. Adjust the severity filter to widen the search.');
   assert.ok(screen.getByRole('heading', { name: 'No logs found' }));

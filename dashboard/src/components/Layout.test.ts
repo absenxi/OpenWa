@@ -107,11 +107,12 @@ test('the theme button can return to following the system', () => {
   const button = container.querySelector<HTMLButtonElement>('.appearance-menu .theme-toggle-btn')!;
   const seen = [button.textContent];
   for (let i = 0; i < 3; i++) {
+    const shown = button.textContent;
     const announced = button.getAttribute('aria-label');
     rtl.fireEvent.click(button);
     seen.push(button.textContent);
-    // The label names the state the click selects.
-    assert.equal(announced, `Switch to ${button.textContent}`);
+    // The name starts with the mode shown, then names the mode the click selects.
+    assert.equal(announced, `${shown}, Switch to ${button.textContent}`);
   }
   assert.deepEqual(seen, ['System', 'Light', 'Dark', 'System']);
   assert.equal(localStorage.getItem('openwa_theme'), 'system');

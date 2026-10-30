@@ -371,6 +371,38 @@ if [ -f "$STAGE/database.sql" ] && [ -f "$STAGE/database.schema" ]; then
   fi
 fi
 
+# pg_dump from 13.22, 14.19, 15.14, 16.10 and 17.6 on (the image ships 17) opens a plain dump with \restrict, a psql
+# meta-command no older psql knows, and no 12: such a psql stops there with "invalid command \restrict" and loads
+# nothing. The printed load runs the psql on PATH, so one that cannot read this dump stops the restore before
+# anything is written. Only the psql on PATH is checked, read without the load's arguments (Debian's
+# pg_wrapper may pick another client by them); with none, the printed text names the versions.
+psql_reads_restrict() {
+  local re='\) ([0-9]+)\.?([0-9]*)'
+  [[ $1 =~ $re ]] || return 1
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]:-0}"
+  case "$major" in
+    13) [ "$minor" -ge 22 ] ;;
+    14) [ "$minor" -ge 19 ] ;;
+    15) [ "$minor" -ge 14 ] ;;
+    16) [ "$minor" -ge 10 ] ;;
+    17) [ "$minor" -ge 6 ] ;;
+    *) [ "$major" -ge 18 ] ;;
+  esac
+}
+PSQL_RESTRICT=""
+if [ -f "$STAGE/database.sql" ] && grep -q '^\\restrict ' "$STAGE/database.sql"; then
+  PSQL_RESTRICT="psql 13.22, 14.19, 15.14, 16.10, 17.6 or newer (no 12)"
+  if command -v psql >/dev/null 2>&1; then
+    PSQL_VERSION="$(psql --version 2>&1 || true)"
+    if ! psql_reads_restrict "$PSQL_VERSION"; then
+      log "ERROR: the archive's PostgreSQL dump opens with \\restrict, which this psql cannot read: $PSQL_VERSION"
+      log "       the load needs $PSQL_RESTRICT; nothing has been restored yet. Install a newer"
+      log "       PostgreSQL client or put one first on PATH (the image ships 17), then re-run"
+      exit 1
+    fi
+  fi
+fi
+
 # Targets resolve exactly like the app: an explicit environment value, then ./.env, then the
 # dashboard's .env.generated, else the app's ./data defaults under OPENWA_DATA_DIR. They may
 # legitimately live outside it, where the environment or ./.env says so (see archive_target). The
@@ -664,11 +696,14 @@ if [ -f "$STAGE/database.sql" ]; then
   cp "$STAGE/database.sql" "$DATA_DIR/database.sql"
   if [ -n "$PG_DUMP_SCHEMA" ]; then
     log "Postgres dump of schema $PG_DUMP_SCHEMA (POSTGRES_SCHEMA) present. It holds that schema only: load it into"
-    log "the database the app uses, without renaming or recreating it, as a role that may create schemas and"
-    log "extensions there and, when pg_trgm and unaccent live in that schema, owns them (the role that created them:"
-    log "the app's own, or the one an earlier load ran as), or as a superuser. The same goes for pgcrypto when the"
-    log "dump carries it, which it does only when pgcrypto lived in that schema (PostgreSQL 12 or older, where the app"
-    log "creates it there for its ids). Other schemas in that database are left alone, and a schema $PG_DUMP_SCHEMA"
+    log "the database the app uses, without renaming or recreating it, as the app's role, or a member of it, that may"
+    log "create schemas and extensions there and, when pg_trgm and unaccent live in that schema, owns them (the role"
+    log "that created them: the app's own, or the one an earlier load ran as), or as a superuser. The same goes for"
+    log "pgcrypto when the dump carries it, which it does only when pgcrypto lived in that schema (PostgreSQL 12 or"
+    log "older, where the app creates it there for its ids). When another role owns the schema, only a superuser can"
+    log "load it: the dump gives what is in it to the app's role before it grants that role CREATE on the schema."
+    log "After ALTER SCHEMA $PG_DUMP_SCHEMA OWNER TO <the app's role>, a new backup loads as that role. Other schemas"
+    log "in that database are left alone, and a schema $PG_DUMP_SCHEMA"
     log "already in it is first moved aside as ${PG_DUMP_SCHEMA}_pre_restore_<time>, rows and all; pg_trgm and"
     log "unaccent, when they live in it, are dropped from the copy with its trigram index (idx_messages_body_trgm), and"
     log "such a pgcrypto with the copy's id column defaults, so the dump can create them again. A load that"
@@ -708,6 +743,9 @@ if [ -f "$STAGE/database.sql" ]; then
     log "and a system CA store, which the image lacks)"
   fi
   log "(sed drops a setting this image's pg_dump 17 writes and PostgreSQL 16 rejects)"
+  if [ -n "$PSQL_RESTRICT" ]; then
+    log "(the load needs $PSQL_RESTRICT: the dump opens with \\restrict, where an older one stops and loads nothing)"
+  fi
 fi
 
 log "Restore complete. Start the app and confirm an existing API key still authenticates."

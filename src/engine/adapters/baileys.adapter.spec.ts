@@ -389,6 +389,22 @@ describe('BaileysAdapter lifecycle & status', () => {
     expect(onReady).toHaveBeenCalledWith('628999', 'Me');
   });
 
+  it('takes the push name on connection open from the live credentials, not the copy the socket was built with', async () => {
+    const onReady = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize(noopCallbacks({ onReady }));
+    fakeSock.authState.creds.me = { id: '628999:12@s.whatsapp.net', name: 'Synced Name' };
+    // Baileys copies creds.me into sock.user when it builds the socket, before a new link's name syncs.
+    Object.defineProperty(fakeSock, 'user', { configurable: true, value: { id: '628999:12@s.whatsapp.net' } });
+    try {
+      fakeSock.fire('connection.update', { connection: 'open' });
+      expect(adapter.getPushName()).toBe('Synced Name');
+      expect(onReady).toHaveBeenCalledWith('628999', 'Synced Name');
+    } finally {
+      delete (fakeSock as { user?: unknown }).user;
+    }
+  });
+
   it('answers a decryption retry only with a stored message from the chat that asks for it', async () => {
     await newAdapter().initialize(noopCallbacks({}));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access

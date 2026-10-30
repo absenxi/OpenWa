@@ -172,6 +172,7 @@ export function Logs() {
               { value: 'warn', label: t('logs.severity.warn') },
               { value: 'error', label: t('logs.severity.error') },
             ]}
+            ariaLabel={t('logs.columns.severity')}
           />
         </div>
       </div>

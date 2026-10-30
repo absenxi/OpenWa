@@ -116,3 +116,9 @@ test('the login form aligns to the document direction, which is set on <html>', 
   assert.deepEqual(css.match(/[^\s,{}][^,{}]*\s\[dir[^\]]*\][^{]*/g) ?? [], []);
   assert.match(css, /\.login-container \.login-form \{\s*text-align: start;\s*\}/);
 });
+
+// The language picker shows the language in use; its name says it picks the language and keeps the shown words.
+test('the language picker is named for what it sets and for the language it shows', () => {
+  rtl.render(createElement(Login, { onLogin: () => undefined }));
+  assert.ok(rtl.screen.getByRole('button', { name: 'Language, English' }));
+});

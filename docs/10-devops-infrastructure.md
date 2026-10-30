@@ -1031,7 +1031,10 @@ runs from the previous uncached render (renders are cached for 5 s), so with sev
 shared between them. `openwa_unhandled_rejections_total{kind="page_context_lost"}` counts the expected
 Puppeteer rejections a page navigation or an engine teardown leaves without an owner; alert on
 `kind="other"`. A whatsapp-web.js session reports a failed re-inject into its reloaded page itself, as a
-`page_reinject_failed` warning naming the session, so that one is not counted here.
+`page_reinject_failed` warning naming the session, so that one is not counted here. A re-inject that
+loads its helpers but then fails to attach the event listeners raises neither signal and emits no
+`ready`: the liveness probe finds the helpers, so the session stays `READY` with sends working while
+inbound messages can stop arriving, and only restarting the session recovers it.
 
 `src/common/docs-metrics-list.spec.ts` compares this table against the metric names declared in
 `metrics.service.ts` and `request-metrics.ts`, and checks that every helper `render()` splices in is

@@ -42,6 +42,8 @@
     "optional": "אופציונלי",
     "fieldTooLong": "מוגבל ל-{{max}} תווים (כרגע {{count}}).",
     "language": "שפה",
+    "changeLanguage": "שינוי שפה",
+    "joinedName": "{{first}}, {{second}}",
     "back": "חזרה",
     "next": "הבא",
     "previous": "הקודם",
@@ -800,9 +802,9 @@
     "nameTooShort": "השתמשו לפחות ב-3 תווים.",
     "rolesTitle": "מדריך תפקידים",
     "roles": {
-      "admin": "Admin",
-      "operator": "Operator",
-      "viewer": "Viewer"
+      "admin": "מנהל",
+      "operator": "מפעיל",
+      "viewer": "צופה"
     },
     "roleDescriptions": {
       "admin": "גישה מלאה לכל המשאבים",
@@ -1232,8 +1234,8 @@
       "storagePath": "נתיב אחסון",
       "bucket": "שם Bucket",
       "region": "אזור (Region)",
-      "accessKey": "Access Key",
-      "secretKey": "Secret Key",
+      "accessKey": "מפתח גישה",
+      "secretKey": "מפתח סודי",
       "endpoint": "Endpoint מותאם (אופציונלי)",
       "endpointHint": "עבור MinIO או שירותים אחרים תואמי S3",
       "s3Unreachable": "S3 (לא נגיש)"

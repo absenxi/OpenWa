@@ -292,6 +292,15 @@ curl -X POST 'http://localhost:2785/api/infra/storage/import' \
   -H 'X-API-Key: YOUR_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"filePath": "data/exports/storage-export-xxx.tar.gz"}'
+
+# Step 6 (Local to S3): clean up STORAGE_LOCAL_PATH. On S3 the store still reads that directory as its
+#   fallback: what is left there is listed, served when the bucket has no copy, and archived by
+#   scripts/backup.sh. Media written between Step 2 and Step 4, and any file whose import failed, live
+#   there alone, so never empty it outright. Once Step 5 answers "failed": 0, stop the sessions and
+#   run Steps 2 and 5 again: on S3 the export reads the local directory too, so this copies what only
+#   it held into the bucket. When that import also answers "failed": 0, move the directory's contents
+#   aside (keep the directory: writes land there while the bucket is down). Or delete only the local
+#   files whose key the bucket already holds.
 ```
 
 | Scenario                     | Support | Method                   |
@@ -904,6 +913,7 @@ skips: check `pg_index.indisvalid` and drop the invalid index before building it
 
 | Release  | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `next`   | Rolling back to 0.26.0 with the database kept (changing only the image tag, or `helm rollback`) lists every Baileys chat deleted since the upgrade again: 0.26.0 reads the `chat_states` rows a deleted chat keeps, with `deletedAt` set, as live chats                                                                                                                                                                                                                                          | With the app stopped and its database up (built-in PostgreSQL: `docker compose --profile postgres up -d postgres`, or `docker start openwa-postgres`), run `npm run migration:revert:prod` once in the new image before the swap (`docker compose run --rm --no-deps openwa-api npm run migration:revert:prod`; Helm: a helper pod on the volume, as in 11 - Runbook: Restore from Backup); it deletes those rows. Restoring the pre-upgrade backup also avoids it             |
 | `0.26.0` | Existing and older-backup LID mappings become display data; phone/LID aliases stay disabled until an actual engine mapping report. Cache-only lookup results cannot authorize an alias. Baileys preserves LIDs in message and listing identities instead of deriving them from cached phone numbers                                                                                                                                                                                              | Upgrade every reader together: older versions do not enforce the origin flag. Exact-ID grants remain available. Back up before downgrade; reversing this migration clears unreported display phone mappings so an older reader cannot authorize them                                                                                                                                                                                                                           |
 | `0.26.0` | The first boot rewrites every legacy `messages.type` value in one `UPDATE`, inside the transaction of the other pending migrations: on PostgreSQL about a minute per million legacy rows, with the port closed. Only a database whose conversion kept being cancelled on `0.25.0` still holds a large backlog                                                                                                                                                                                    | Count them with `SELECT count(*) FROM messages WHERE type IN ('chat', 'buttons_response', 'list_response', 'template_button_reply', 'ptt', 'vcard', 'multi_vcard')`; above a few million, run the migrations first (section 14.5), or raise `startupProbe.failureThreshold` to cover about a minute per million legacy rows (measured with twelve indexes on the table) on top of the index builds                                                                             |
 | `0.26.0` | A production boot refuses a `METRICS_TOKEN` that is the `.env.example` placeholder or a weak value the other secrets are checked against (`test`, `change-me`, `changeme`, `password`, `secret`, `admin`, `demo` and a few more), trimmed and case-insensitive                                                                                                                                                                                                                                   | Set a long random token, or unset `METRICS_TOKEN` to keep `/api/metrics` disabled (it answers `404`); there is no length floor, so a short value that is not on the list still boots                                                                                                                                                                                                                                                                                           |
@@ -1012,7 +1022,11 @@ if [ -f "$BACKUP_DIR/database.sql" ]; then
     # at it. For an external server the script stops: rename the database and load the dump as step 3
     # of 11 - Runbook: Restore from Backup shows, then run steps 2-6 below by hand without this
     # PostgreSQL block: nothing after step 1 is restored yet. The upgraded database is kept under a
-    # _pre_restore_ name, and sed drops the pg_dump 17 line PostgreSQL 16 rejects.
+    # _pre_restore_ name, and sed drops the pg_dump 17 line PostgreSQL 16 rejects. A container psql too
+    # old for the dump's \restrict (older than 13.22, 14.19, 15.14, 16.10 or 17.6, or any 12) stops the
+    # script at the check before the rename, with nothing after step 1 restored: recreate the container
+    # from a fresh postgres:16-alpine as step 3 of 11 - Runbook: Restore from Backup says, then run this
+    # script again.
     if ! docker start openwa-postgres 2>/dev/null; then
         grep -qE '^DATABASE_HOST=(postgres|openwa-postgres)$' .env || {
             echo "External PostgreSQL: rollback INCOMPLETE, nothing after step 1 has been restored."
@@ -1023,6 +1037,8 @@ if [ -f "$BACKUP_DIR/database.sql" ]; then
         docker compose --profile postgres up -d postgres
     fi
     docker exec openwa-postgres sh -c 'until pg_isready -q -U "$POSTGRES_USER"; do sleep 1; done'
+    docker exec openwa-postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+      -c "\restrict openwa" -c "\unrestrict openwa"'
     docker exec openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
       -c "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO \"${POSTGRES_DB}_pre_restore_$(date +%Y%m%d%H%M%S)\"" \
       -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\""'
