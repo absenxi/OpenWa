@@ -386,3 +386,109 @@ describe('Baileys chats deleted together by one chats.delete event', () => {
     },
   );
 });
+
+/**
+ * A disappearing-messages timer turned off while a chat is marked deleted. Baileys reports the change as a
+ * chats.update with ephemeralExpiration null and no conversationTimestamp (Utils/process-message.js: a
+ * protocol message is not a real message), and the adapter routes the protocol message itself to
+ * processMessageChange, never to recordMessage, so nothing clears the mark first.
+ */
+describe('Baileys disappearing timer changed around a chat deletion', () => {
+  const SID = 'sess-1';
+  const PEER = '628111@s.whatsapp.net';
+  const DELETED_AT_MS = 1_800_000_000_400;
+  const DAY = 86_400;
+  const received = (id: string, atMs: number): WAMessage => ({
+    key: { remoteJid: PEER, fromMe: false, id },
+    messageTimestamp: Math.floor(atMs / 1000),
+    message: { conversation: id },
+  });
+  const chatUpdate = (msg: WAMessage): Partial<Chat> => ({
+    id: PEER,
+    conversationTimestamp: Number(msg.messageTimestamp),
+    unreadCount: 1,
+    messages: [{ message: msg }],
+  });
+  function timedChat() {
+    const store = new BaileysSessionStore(undefined, SID, new FakeChatStateStore());
+    store.upsertChats([
+      {
+        id: PEER,
+        conversationTimestamp: 1_799_990_000,
+        ephemeralExpiration: DAY,
+        ephemeralSettingTimestamp: 1_799_000_000,
+      },
+    ]);
+    expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
+    return store;
+  }
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a timer turned off while the chat is deleted is not used by the next send', () => {
+    const store = timedChat();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 60_000);
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_800_000_060, ephemeralExpiration: null }]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+    // The change lists nothing and writes no chat state: the chat stays deleted.
+    expect(store.listChats()).toEqual([]);
+    expect(store.chatDeletedAt(PEER)).toBe(DELETED_AT_MS);
+  });
+
+  it('a timer turned on while the chat is deleted is used by the next send, and the chat stays unlisted', () => {
+    const store = new BaileysSessionStore(undefined, SID, new FakeChatStateStore());
+    store.upsertChats([{ id: PEER, conversationTimestamp: 1_799_990_000 }]);
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 60_000);
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_800_000_060, ephemeralExpiration: DAY }]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
+    expect(store.listChats()).toEqual([]);
+  });
+
+  it('a timer turned off while the chat is deleted is not used after a newer message re-creates the chat', () => {
+    const store = timedChat();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 60_000);
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_800_000_060, ephemeralExpiration: null }]);
+    now.mockReturnValue(DELETED_AT_MS + 120_000);
+    const text = received('3EB0AFTEROFF', DELETED_AT_MS + 120_000);
+    const order = store.nextMessageOrder();
+    store.upsertChats([chatUpdate(text)]);
+    store.recordMessage(text, 'text', order);
+
+    expect(store.listChats().map(c => c.id)).toEqual(['628111@c.us']);
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+  });
+
+  it('a timer turned off in a held update applied beneath a newer write is not used by the next send', () => {
+    const store = timedChat();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 300);
+    const image = received('3EB0SLOWIMAGE', DELETED_AT_MS + 300);
+    const imageOrder = store.nextMessageOrder();
+    // The buffered flush merged the EPHEMERAL_SETTING update into the image's chat update (concatChats).
+    store.upsertChats([{ ...chatUpdate(image), ephemeralExpiration: null, ephemeralSettingTimestamp: 1_800_000_000 }]);
+    now.mockReturnValue(DELETED_AT_MS + 2_000);
+    const text = received('3EB0FASTTEXT', DELETED_AT_MS + 2_000);
+    const textOrder = store.nextMessageOrder();
+    store.upsertChats([chatUpdate(text)]);
+    store.recordMessage(text, 'text', textOrder);
+    store.recordMessage(image, 'image', imageOrder);
+
+    expect(store.listChats().map(c => c.id)).toEqual(['628111@c.us']);
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+  });
+
+  it('control: the same timer-off update on a chat that was never deleted clears the timer', () => {
+    const store = timedChat();
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_800_000_060, ephemeralExpiration: null }]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+  });
+});

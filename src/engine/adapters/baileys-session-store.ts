@@ -337,6 +337,9 @@ export class BaileysSessionStore {
       // an archive or pin made ahead of it. Kept, either would show on the chat a later message re-creates.
       const timestamp = this.toUnixSeconds(r.conversationTimestamp);
       if (this.stillDeleted(r.id, timestamp)) {
+        // Except its disappearing timer, which WhatsApp keeps across a deletion, as this store does: a timer
+        // turned off while the chat is deleted comes with no message. A held update's timer is applied now.
+        this.applyChatTimer(r.id, r);
         // The update of a message from the deletion's own second waits for that message's record.
         const messageId = r.messages?.[0]?.message?.key?.id;
         const mark = messageId ? this.deletionMark(this.markKeys(r.id)) : undefined;
@@ -348,23 +351,29 @@ export class BaileysSessionStore {
       const existing = this.chats.get(r.id) ?? { id: r.id };
       this.chats.set(r.id, { ...existing, ...r });
       this.persistChatState(r.id, r);
-      // A timer the chat itself reports (Baileys emits the EPHEMERAL_SETTING change as chats.update) is
-      // newer than the one learned from messages, and turning the timer off produces no stamped message
-      // that could clear it. Own key only, as in persistChatState: history-sync proto defaults are not news.
-      // Every twin: own sends cache the timer under the phone spelling of a chat Baileys keys by its lid,
-      // and a twin chat record would otherwise serve the old timer from the getEphemeralExpiration fallback.
-      if (Object.hasOwn(r, 'ephemeralExpiration')) {
-        const exp = r.ephemeralExpiration;
-        for (const key of new Set(this.chatTwins(r.id).flatMap(k => [k, this.toNeutralJid(k)]))) {
-          if (typeof exp === 'number' && exp > 0) {
-            this.ephemeralByChat.set(key, exp);
-          } else {
-            this.ephemeralByChat.delete(key);
-          }
-          const twin = key === r.id ? undefined : this.chats.get(key);
-          if (twin) this.chats.set(key, { ...twin, ephemeralExpiration: exp });
-        }
+      this.applyChatTimer(r.id, r);
+    }
+  }
+
+  /**
+   * A timer the chat itself reports (Baileys emits the EPHEMERAL_SETTING change as chats.update) is
+   * newer than the one learned from messages, and turning the timer off produces no stamped message
+   * that could clear it. Own key only, as in persistChatState: history-sync proto defaults are not news.
+   * Every twin: own sends cache the timer under the phone spelling of a chat Baileys keys by its lid,
+   * and a twin chat record would otherwise serve the old timer from the getEphemeralExpiration fallback.
+   * Only the cache and twin records that exist are written: no record is created and nothing persisted.
+   */
+  private applyChatTimer(chatId: string, r: Partial<Chat>): void {
+    if (!Object.hasOwn(r, 'ephemeralExpiration')) return;
+    const exp = r.ephemeralExpiration;
+    for (const key of new Set(this.chatTwins(chatId).flatMap(k => [k, this.toNeutralJid(k)]))) {
+      if (typeof exp === 'number' && exp > 0) {
+        this.ephemeralByChat.set(key, exp);
+      } else {
+        this.ephemeralByChat.delete(key);
       }
+      const twin = key === chatId ? undefined : this.chats.get(key);
+      if (twin) this.chats.set(key, { ...twin, ephemeralExpiration: exp });
     }
   }
 
