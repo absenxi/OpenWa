@@ -117,7 +117,10 @@ otherwise stand until a boot, and any claim since sets `nodeId`, so a row B clai
 predicate spec for `markLapsedDisconnected` in `src/modules/session/session.service.spec.ts` +
 `session-retired-start-leaves-peer-row.spec.ts` for the retired launch +
 `session-init-timeout-after-lease-loss.spec.ts` for the init deadline +
-`src/modules/takeover/session-takeover-failed-adoption.spec.ts` for the failed start.
+`src/modules/takeover/session-takeover-failed-adoption.spec.ts` for the failed start. That
+`stopOrphanEngines` itself writes no row is pinned by `session-delete-claim.spec.ts` ('retires an old
+local engine after a peer takes over and a fresh claim fails with SQL error %s'), where the peer's
+claimed row must still read as the peer's own start left it.
 
 ### INV-7 — FAILED sessions are deliberately NOT adopted by takeover
 
@@ -138,7 +141,9 @@ the session name, and `start()`, `delete()` and `executeReconnect` wait for it t
 `awaitPendingTeardown` (bounded at 10 s and fail-closed: a timeout is a 409 for `start()`/`delete()`
 and a failed attempt for a reconnect), so no new engine or purge races the rm.
 **Pinned by:** `logout-teardown-race.spec.ts`, which enumerates that fence's interleavings. Read it
-before touching anything in the logout/forceKill path.
+before touching anything in the logout/forceKill path. The `executeReconnect` wait is pinned by
+`session-delete-claim.spec.ts` ('keeps a reconnect awaiting teardown when the old start returns from
+its %s').
 
 ### INV-9 — The reconnect loop bounds itself: backoff with jitter, clamp ≤ 5 min and ≤ setTimeout's 32-bit range, alert every 5 consecutive attempts
 
