@@ -245,7 +245,11 @@ different depths — which is what the optional marker exists to allow. wwjs rac
 `Client.getState()` round trip against a 10s timeout, because a wedged page keeps reporting
 CONNECTED. Baileys returns a local check (`status === READY && sock != null`), because its keepalive
 already emits a close event within ~35s. So a wedged wwjs page is caught here; a wedged Baileys
-socket is caught by the transport instead. No REST route: the session watchdog polls it.
+socket is caught by the transport instead. No REST route: the session watchdog polls it. One wwjs
+page it cannot tell from a healthy one: a reload whose re-inject loads the helpers but then fails to
+attach the event listeners emits no `ready`, so the probe finds the helpers and the session stays
+`READY`, sends still working, while inbound messages can stop reaching the gateway until the session
+is restarted.
 
 ### 29.4.2 Sending messages
 
