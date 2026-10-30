@@ -63,6 +63,14 @@ interface BulkMessageContent {
 }
 
 /**
+ * The type a bulk item is reported and stored as: an audio item flagged ptt is a voice note, so the send
+ * hooks and the stored row say 'voice', as they do for a single voice send.
+ */
+function messageTypeOf(type: string, content: BulkMessageContent): string {
+  return type === 'audio' && content.audio?.ptt ? 'voice' : type;
+}
+
+/**
  * Resolve a batch's terminal status, in precedence order:
  *  - cancelled (cancelBatch flipped the flag) → CANCELLED. Must win over the in-memory PROCESSING
  *    status set at the start of processBatch, which would otherwise be saved back over the cancellation.
@@ -655,7 +663,11 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
       // decide; a rewritten chatId is ignored, the item always goes to its own msg.chatId.
       const gate = await this.hookManager.execute(
         'message:sending',
-        { sessionId: batch.sessionId, input: { ...content, chatId: msg.chatId }, type: msg.type },
+        {
+          sessionId: batch.sessionId,
+          input: { ...content, chatId: msg.chatId },
+          type: messageTypeOf(msg.type, content),
+        },
         { sessionId: batch.sessionId, source: 'BulkMessageService' },
       );
       if (!gate.continue) {
@@ -757,7 +769,7 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
             sessionId: batch.sessionId,
             error: sanitized.message,
             input: { ...content, chatId: msg.chatId },
-            type: msg.type,
+            type: messageTypeOf(msg.type, content),
           },
           { sessionId: batch.sessionId, source: 'BulkMessageService' },
         );
@@ -1075,8 +1087,6 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
     // media item (audio carries none). Other keys on the item were never delivered.
     const media = type === 'text' ? undefined : content[type as 'image' | 'video' | 'audio' | 'document'];
     const body = type === 'text' ? content.text : type === 'audio' ? undefined : content.caption;
-    // A bulk audio item flagged ptt is a voice note; store it in the 'voice' bucket like inbound PTT.
-    const persistType = type === 'audio' && content.audio?.ptt ? 'voice' : type;
     try {
       await this.messageService.saveOutgoingMessage(
         sessionId,
@@ -1084,7 +1094,7 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
           waMessageId: result.id,
           chatId,
           body: body ?? '',
-          type: persistType,
+          type: messageTypeOf(type, content),
           timestamp: result.timestamp,
           status: MessageStatus.SENT,
           metadata: media

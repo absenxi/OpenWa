@@ -1393,6 +1393,35 @@ describe('BulkMessageService.processBatch', () => {
     );
   });
 
+  // One voice note carries one type end to end, as on a single voice send: message:sending reads the item
+  // the gate is offered, message:failed the content that was attempted (after a gate rewrite).
+  it.each([
+    ['a ptt item as voice', { url: 'https://x/v', ptt: true }, undefined, ['voice', 'voice']],
+    ['a plain audio item as audio', { url: 'https://x/v' }, undefined, ['audio', 'audio']],
+    [
+      'a ptt item the gate rewrites to plain audio as voice, then audio',
+      { url: 'https://x/v', ptt: true },
+      { audio: { url: 'https://x/v', ptt: false } },
+      ['voice', 'audio'],
+    ],
+  ])('reports %s to message:sending and message:failed', async (_label, audio, rewrite, expected) => {
+    engine.sendAudioMessage = jest.fn().mockRejectedValue(new Error('boom'));
+    const batch = makeBatch(1);
+    batch.messages = [{ chatId: 'c0@c.us', type: 'audio', content: { audio } }];
+    repo.findOne.mockResolvedValue(batch);
+    if (rewrite) {
+      hookManager.execute.mockResolvedValueOnce({ continue: true, data: { input: { ...rewrite, chatId: 'c0@c.us' } } });
+    }
+
+    await runProcessBatch();
+
+    const typesOf = (event: string): string[] =>
+      hookManager.execute.mock.calls
+        .filter(([name]) => name === event)
+        .map(([, data]) => (data as { type: string }).type);
+    expect([...typesOf('message:sending'), ...typesOf('message:failed')]).toEqual(expected);
+  });
+
   it('strips base64 media payloads from the stored batch once it completes (footprint)', async () => {
     engine.sendImageMessage = jest.fn().mockResolvedValue({ id: 'waimg', timestamp: 222 });
     const batch = makeBatch(1);
