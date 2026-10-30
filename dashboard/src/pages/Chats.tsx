@@ -312,8 +312,9 @@ export function Chats() {
   const { appendMessage, updateMessage } = useChatMessagesActions();
   const queryClient = useQueryClient();
 
-  // Lightbox state for media viewer
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  // The media viewer holds the message it shows by the key the thread merges by (waMessageId ?? id, kept when a refetch
+  // swaps a live row for its stored one), never by list position: the image list is rebuilt from the live thread.
+  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
 
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
   // The open room's draft text lives here (not in ChatComposer) so it survives closing and reopening the room. Each
@@ -1913,20 +1914,28 @@ export function Chats() {
   // Image and sticker media items for the lightbox, in render order (an archived sticker opens in its own viewer
   // too, see ArchivedMediaPreview). `getMediaSrc` reconstructs a usable src
   // from either a base64 payload or a URL — the ChatMessageView shape stores both in `data`.
+  const imageMessages = useMemo(
+    () => messages.filter(m => (m.type === 'image' || m.type === 'sticker') && Boolean(getMediaSrc(m.metadata?.media))),
+    [messages],
+  );
   const imageMedia = useMemo<LightboxItem[]>(
     () =>
-      messages
-        .filter(m => (m.type === 'image' || m.type === 'sticker') && Boolean(getMediaSrc(m.metadata?.media)))
-        .map(m => ({
-          id: m.id,
-          url: getMediaSrc(m.metadata?.media),
-          alt: m.body || m.metadata?.media?.filename || '',
-          filename: m.metadata?.media?.filename,
-          senderName: undefined,
-          timestamp: formatChatTime(m.timestamp || Math.floor(new Date(m.createdAt).getTime() / 1000)),
-        })),
-    [messages, formatChatTime],
+      imageMessages.map(m => ({
+        id: m.id,
+        url: getMediaSrc(m.metadata?.media),
+        alt: m.body || m.metadata?.media?.filename || '',
+        filename: m.metadata?.media?.filename,
+        senderName: undefined,
+        timestamp: formatChatTime(m.timestamp || Math.floor(new Date(m.createdAt).getTime() / 1000)),
+      })),
+    [imageMessages, formatChatTime],
   );
+  const lightboxIndex = imageMessages.findIndex(m => (m.waMessageId ?? m.id) === lightboxKey);
+  // An image that left the thread (deleted for everyone, its payload dropped) closes the viewer for good: a key kept
+  // would open it again by itself once the image came back.
+  useEffect(() => {
+    if (lightboxKey !== null && lightboxIndex < 0) setLightboxKey(null);
+  }, [lightboxKey, lightboxIndex]);
 
   return (
     <div className="chats-page">
@@ -2162,8 +2171,8 @@ export function Chats() {
                   onMediaLoad={onMediaLoad}
                   measureMedia={measureMedia}
                   onOpenImage={messageId => {
-                    const idx = imageMedia.findIndex(x => x.id === messageId);
-                    if (idx >= 0) setLightboxIndex(idx);
+                    const opened = imageMessages.find(m => m.id === messageId);
+                    if (opened) setLightboxKey(opened.waMessageId ?? opened.id);
                   }}
                   onReply={setReplyingTo}
                   onReact={handleReactMessage}
@@ -2366,9 +2375,12 @@ export function Chats() {
 
       <MediaLightbox
         items={imageMedia}
-        index={lightboxIndex}
-        onClose={() => setLightboxIndex(null)}
-        onNavigate={setLightboxIndex}
+        index={lightboxIndex < 0 ? null : lightboxIndex}
+        onClose={() => setLightboxKey(null)}
+        onNavigate={i => {
+          const shown = imageMessages[i];
+          if (shown) setLightboxKey(shown.waMessageId ?? shown.id);
+        }}
       />
 
       {groupDialogChat && sessions.some(s => s.id === selectedSessionId) && (

@@ -17,6 +17,7 @@ import { createElement } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Session, Chat, ChatMessage, SearchHit, Channel, ChannelMessage, StatusUpdate } from '../services/api';
 import { MENTION_CLOSE, MENTION_OPEN } from '../utils/messageFormatter.ts';
+import { MEDIA_PAYLOAD_CACHE_LIMIT } from '../utils/chatMessages.ts';
 import type { installJsdomGlobals as installJsdomGlobalsFn } from '../test-helpers/jsdom.ts';
 // socket.io-client resolves to a double under this runner (see vite-shim-hooks.mjs), which is what
 // lets a test deliver a server frame to the page's realtime handlers.
@@ -165,6 +166,8 @@ const PAGED_OLDEST = Array.from({ length: 20 }, (_, i) =>
 let olderPageGate: Promise<void> | null = null;
 // When true, an older-page request (any offset but 0) answers 500 instead of a page.
 let olderPageFails = false;
+// Rows Carol's older page serves after the fixture rows (oldest last, as the gateway orders them).
+let olderPageExtra: ChatMessage[] = [];
 
 function holdOlderPage(): () => void {
   let release!: () => void;
@@ -332,7 +335,7 @@ function installFetchStub(): void {
       if (query.get('chatId') === CHAT_2.id) {
         const isFirstPage = Number(query.get('offset')) === 0;
         if (!isFirstPage && olderPageFails) return Promise.resolve(jsonResponse({ message: 'boom' }, 500));
-        const messages = isFirstPage ? PAGED_NEWEST : PAGED_OLDEST;
+        const messages = isFirstPage ? PAGED_NEWEST : [...PAGED_OLDEST, ...olderPageExtra];
         // `total` deliberately does NOT equal the 120 rows actually served (PAGED_NEWEST.length +
         // PAGED_OLDEST.length). The current termination rule never reads this field — it stops on a
         // page short of what it asked for — so the value doesn't matter to it either way. It matters
@@ -449,6 +452,7 @@ afterEach(async () => {
   firstPageExtra = [];
   sendTextId = 'wamid.out.1';
   olderPageFails = false;
+  olderPageExtra = [];
   chatsResponder = null;
   for (const id of Object.keys(lidPhones)) delete lidPhones[id];
   thirdSessionStatus = null;
@@ -4390,4 +4394,199 @@ test('sending with the Send button leaves focus in the message field', async () 
     await waitFor(() => assert.equal(countFetchCalls('POST', `/api/sessions/${SESSION.id}/messages/send-text`), 1));
     await flush();
   }
+});
+
+// ── The media viewer follows the image it was opened on ─────────────────────────
+
+const inlineImage = (key: string, second: number): ChatMessage => ({
+  ...DB_MESSAGE,
+  id: `db-img-${key}`,
+  waMessageId: `wamid.img.${key}`,
+  body: '',
+  type: 'image',
+  timestamp: 1_700_000_000 + second,
+  createdAt: new Date((1_700_000_000 + second) * 1000).toISOString(),
+  metadata: { media: { mimetype: 'image/png', filename: `${key}.png`, data: `http://localhost/media/${key}.png` } },
+});
+
+const viewerSlideSrc = (): string | null =>
+  document.querySelector('[role="dialog"] .yarl__slide_current img')?.getAttribute('src') ?? null;
+
+const revokeEvent = (waMessageId: string) => ({
+  id: waMessageId,
+  revokedId: waMessageId,
+  chatId: CHAT.id,
+  from: CHAT.id,
+  to: 'me',
+  body: '',
+  type: 'revoked',
+  timestamp: 1_700_003_000,
+});
+
+test('the media viewer keeps showing the image it was opened on when an earlier image is deleted', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  firstPageExtra = [inlineImage('a', 10), inlineImage('b', 11), inlineImage('c', 12)];
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const images = await waitFor(() => {
+    const found = container.querySelectorAll('.room-messages img.chat-image-media');
+    assert.equal(found.length, 3, 'the three image bubbles did not render');
+    return found;
+  });
+  fireEvent.click(images[1]);
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/b.png'));
+
+  // The sender deletes the first image for everyone while the second is on screen.
+  receiveEvent('message.revoked', revokeEvent('wamid.img.a'));
+  await waitFor(() => assert.equal(container.querySelectorAll('.room-messages img.chat-image-media').length, 2));
+  await flush();
+
+  assert.equal(viewerSlideSrc(), 'http://localhost/media/b.png', 'the viewer moved to another image');
+});
+
+test('a media viewer whose image was deleted does not open again by itself when another image arrives', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  firstPageExtra = [inlineImage('a', 10)];
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const image = await waitFor(() => {
+    const found = container.querySelector('.room-messages img.chat-image-media');
+    assert.ok(found, 'the image bubble did not render');
+    return found;
+  });
+  fireEvent.click(image);
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/a.png'));
+
+  // The only image is deleted for everyone while it is on screen: the viewer has nothing left to show.
+  receiveEvent('message.revoked', revokeEvent('wamid.img.a'));
+  await waitFor(() => assert.equal(document.querySelector('[role="dialog"]') === null, true, 'the viewer stayed open'));
+
+  // Another image arrives in the open chat; nobody asked for the viewer.
+  receiveEvent('message.received', {
+    id: 'wamid.img.new',
+    chatId: CHAT.id,
+    from: CHAT.id,
+    to: 'me',
+    body: '',
+    type: 'image',
+    fromMe: false,
+    timestamp: 1_700_003_001,
+    media: { mimetype: 'image/png', data: 'http://localhost/media/new.png' },
+  });
+  await waitFor(() => assert.ok(container.querySelector('.room-messages img[src="http://localhost/media/new.png"]')));
+  await flush();
+
+  assert.equal(viewerSlideSrc(), null, 'the media viewer opened without a click');
+});
+
+// A thread holding as many media payloads as it keeps drops the oldest one when another arrives, so every image after
+// it moves up the list.
+test('the media viewer keeps its image when a new one pushes the oldest payload out of the thread', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  // Newest first, as the gateway serves a page: the cache holds it oldest first and strips payloads from the front.
+  firstPageExtra = Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT }, (_, i) => {
+    const n = MEDIA_PAYLOAD_CACHE_LIMIT - 1 - i;
+    return inlineImage(`p${n}`, 10 + n);
+  });
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const images = await waitFor(() => {
+    const found = container.querySelectorAll('.room-messages img.chat-image-media');
+    assert.equal(found.length, MEDIA_PAYLOAD_CACHE_LIMIT, 'the image bubbles did not render');
+    return found;
+  });
+  fireEvent.click(images[50]);
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/p50.png'));
+
+  receiveEvent('message.received', {
+    id: 'wamid.img.new',
+    chatId: CHAT.id,
+    from: CHAT.id,
+    to: 'me',
+    body: '',
+    type: 'image',
+    fromMe: false,
+    timestamp: 1_700_003_001,
+    media: { mimetype: 'image/png', data: 'http://localhost/media/new.png' },
+  });
+  await waitFor(() => assert.ok(container.querySelector('.room-messages img[src="http://localhost/media/new.png"]')));
+  await waitFor(() =>
+    assert.equal(container.querySelector('.room-messages img[src="http://localhost/media/p0.png"]') === null, true),
+  );
+  await flush();
+
+  assert.equal(viewerSlideSrc(), 'http://localhost/media/p50.png', 'the viewer moved to another image');
+});
+
+test('the media viewer keeps its image when an older page lands in front of it', async () => {
+  const { fireEvent, waitFor } = rtl;
+  olderPageExtra = [
+    pagedRow(-1, {
+      id: 'paged-img-old',
+      waMessageId: 'wamid.paged.img.old',
+      body: '',
+      type: 'image',
+      metadata: { media: { mimetype: 'image/png', data: 'http://localhost/media/old.png' } },
+    }),
+  ];
+  const { container } = renderChats();
+  const thread = await openPagedChat(container);
+  receiveEvent('message.received', {
+    id: 'wamid.img.carol',
+    chatId: CHAT_2.id,
+    from: CHAT_2.id,
+    to: 'me',
+    body: '',
+    type: 'image',
+    fromMe: false,
+    timestamp: 1_700_003_001,
+    media: { mimetype: 'image/png', data: 'http://localhost/media/carol.png' },
+  });
+  const image = await waitFor(() => {
+    const found = thread.querySelector('img[src="http://localhost/media/carol.png"]');
+    assert.ok(found, 'the image bubble did not render');
+    return found;
+  });
+  fireEvent.click(image);
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/carol.png'));
+
+  makeScrollable(thread, 0);
+  fireEvent.scroll(thread);
+  await waitFor(() => assert.ok(thread.querySelector('img[src="http://localhost/media/old.png"]')));
+  await flush();
+
+  assert.equal(viewerSlideSrc(), 'http://localhost/media/carol.png', 'the viewer moved to another image');
+});
+
+test('the media viewer moves to the next image and stays there', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  firstPageExtra = [inlineImage('b', 11), inlineImage('a', 10)];
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const image = await waitFor(() => {
+    const found = container.querySelector('.room-messages img[src="http://localhost/media/a.png"]');
+    assert.ok(found, 'the image bubble did not render');
+    return found;
+  });
+  fireEvent.click(image);
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/a.png'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+  await waitFor(() => assert.equal(viewerSlideSrc(), 'http://localhost/media/b.png'));
+
+  // A new image rebuilds the viewer's list; what it shows then is the image the page holds as viewed.
+  receiveEvent('message.received', {
+    id: 'wamid.img.new',
+    chatId: CHAT.id,
+    from: CHAT.id,
+    to: 'me',
+    body: '',
+    type: 'image',
+    fromMe: false,
+    timestamp: 1_700_003_001,
+    media: { mimetype: 'image/png', data: 'http://localhost/media/new.png' },
+  });
+  await waitFor(() => assert.ok(container.querySelector('.room-messages img[src="http://localhost/media/new.png"]')));
+  await flush();
+  assert.equal(viewerSlideSrc(), 'http://localhost/media/b.png', 'the viewer went back to the image it was opened on');
 });
