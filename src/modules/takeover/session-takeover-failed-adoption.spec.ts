@@ -239,4 +239,32 @@ describe('a start that fails before an engine exists on a session a vanished nod
     expect(await rowOf(id)).toEqual(running);
     expect(b.events.emitSessionStatus).not.toHaveBeenCalledWith(id, SessionStatus.DISCONNECTED);
   });
+
+  it('leaves the status of a peer that claimed and started the session after the release', async () => {
+    const id = await orphan();
+    const b = node('node-b', db, true);
+    const c = node('node-c', db, false);
+    // node-b's release lands, and its correction is held back, as a slow write would be.
+    const release = b.ownership.release.bind(b.ownership);
+    let openCorrection: () => void = () => undefined;
+    const correction = new Promise<void>(resolve => (openCorrection = resolve));
+    let releasedResolve: () => void = () => undefined;
+    const released = new Promise<void>(resolve => (releasedResolve = resolve));
+    jest.spyOn(b.ownership, 'release').mockImplementationOnce(async (...args: Parameters<typeof release>) => {
+      await release(...args);
+      releasedResolve();
+      await correction;
+    });
+
+    const failing = b.service.start(id, { explicit: true });
+    await released;
+    await c.service.start(id, { explicit: true });
+    expect(await rowOf(id)).toEqual({ status: SessionStatus.INITIALIZING, nodeId: 'node-c' });
+
+    openCorrection();
+    await expect(failing).rejects.toThrow('EACCES');
+
+    expect(await rowOf(id)).toEqual({ status: SessionStatus.INITIALIZING, nodeId: 'node-c' });
+    expect(b.events.emitSessionStatus).not.toHaveBeenCalledWith(id, SessionStatus.DISCONNECTED);
+  });
 });
