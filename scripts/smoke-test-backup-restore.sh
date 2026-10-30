@@ -106,6 +106,8 @@
 #       it, the extensions' owner and
 #       the way past another deployment's trigram index, only for a marked archive, in one transaction either way,
 #       and refuses a marker naming an invalid schema
+#   (aw) restore stops before it writes anything when the dump opens with \restrict and the psql on PATH is too old
+#       to read it, and otherwise, with no psql on PATH too, names the psql versions the load needs
 #
 # Usage: ./scripts/smoke-test-backup-restore.sh
 # Requires: bash, tar, node (restore.sh path resolution). sqlite3 is optional (see (c) and (k)).
@@ -3134,6 +3136,62 @@ if [ "$rc" -eq 0 ] || [ -e "$AV/dst/data/main.sqlite" ] || ! grep -q "database.s
   fail "(av) a marker naming an invalid schema did not stop the restore (rc $rc): $OUT_AV"
 fi
 pass "(av) a non-public POSTGRES_SCHEMA is dumped alone with its extensions and restored into its own database"
+
+echo ""
+printf '%s\n' "==> (aw) a psql on PATH that cannot read the dump's \\restrict stops the restore before anything is written"
+# pg_dump from 13.22, 14.19, 15.14, 16.10 and 17.6 on opens a plain dump with \restrict, which an older psql, and every
+# 12, stops at with "invalid command \restrict", loading nothing. The psql shim reports AW_PSQL as its version.
+AW="$WORK/aw"
+mkdir -p "$AW/bin" "$AW/stage" "$AW/nopsql"
+cat >"$AW/bin/psql" <<'EOF'
+#!/bin/sh
+echo "psql (PostgreSQL) $AW_PSQL"
+EOF
+chmod +x "$AW/bin/psql"
+tar -xzf "$ARCHIVE_AV_WHOLE" -C "$AW/stage"
+{ printf '%s\n' '--' '-- PostgreSQL database dump' '--' '' '\restrict key' && cat "$AW/stage/database.sql"; } >"$AW/dump.sql"
+mv "$AW/dump.sql" "$AW/stage/database.sql"
+tar -czf "$AW/restricted.tar.gz" -C "$AW/stage" .
+# aw_restore <archive> <PATH> [VAR=value...]: a restore into an empty directory, its output left in OUT_AW and its
+# exit status in rc.
+aw_restore() {
+  rm -rf "$AW/dst" && mkdir -p "$AW/dst"
+  set +e
+  OUT_AW="$(cd "$AW/dst" && env "${@:3}" PATH="$2" "$RESTORE" "$1" 2>&1)"
+  rc=$?
+  set -e
+}
+AW_NEEDS='psql 13.22, 14.19, 15.14, 16.10, 17.6 or newer (no 12)'
+for AW_OLD in 12.22 13.21 14.18 15.13 16.9 17.5 9.6.24 'unknown build'; do
+  aw_restore "$AW/restricted.tar.gz" "$AW/bin:$PATH" AW_PSQL="$AW_OLD"
+  if [ "$rc" -eq 0 ] || [ -e "$AW/dst/data" ] ||
+    ! grep -qF "which this psql cannot read: psql (PostgreSQL) $AW_OLD" <<<"$OUT_AW" ||
+    ! grep -qF "the load needs $AW_NEEDS; nothing has been restored yet" <<<"$OUT_AW"; then
+    fail "(aw) psql $AW_OLD did not stop the restore before anything was written (rc $rc): $OUT_AW"
+  fi
+done
+# A psql that reads it, or none on PATH (the load may run elsewhere), restores and names the versions with the load.
+populate_shim "$AW/nopsql"
+for tool in node find basename printenv readlink; do
+  ln -sf "$(command -v "$tool")" "$AW/nopsql/$tool"
+done
+for AW_NEW in 13.22 14.19 15.14 16.10 17.6 18.0 '16.10 (Ubuntu 16.10-0ubuntu0.24.04.1)' 19devel none; do
+  if [ "$AW_NEW" = none ]; then
+    aw_restore "$AW/restricted.tar.gz" "$AW/nopsql"
+  else
+    aw_restore "$AW/restricted.tar.gz" "$AW/bin:$PATH" AW_PSQL="$AW_NEW"
+  fi
+  if [ "$rc" -ne 0 ] || [ ! -f "$AW/dst/data/main.sqlite" ] ||
+    ! grep -qF "(the load needs $AW_NEEDS: the dump opens with \\restrict" <<<"$OUT_AW"; then
+    fail "(aw) psql $AW_NEW did not restore the archive and name the versions its load needs (rc $rc): $OUT_AW"
+  fi
+done
+# A dump without \restrict, from an older pg_dump, loads with any psql.
+aw_restore "$ARCHIVE_AV_WHOLE" "$AW/bin:$PATH" AW_PSQL=12.22
+if [ "$rc" -ne 0 ] || [ ! -f "$AW/dst/data/main.sqlite" ] || grep -q 'the load needs' <<<"$OUT_AW"; then
+  fail "(aw) a dump without \\restrict was refused or named a psql it does not need (rc $rc): $OUT_AW"
+fi
+pass "(aw) restore refuses a psql that cannot read the dump's \\restrict and names the versions that can"
 
 echo ""
 echo "All smoke tests passed!"

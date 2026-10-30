@@ -632,9 +632,17 @@ docker compose run --rm --no-deps --entrypoint /app/scripts/restore.sh \
 # under a new name, as the SQLite path keeps data.pre-restore-<ts>, and an empty one takes its place.
 # The container's own POSTGRES_USER and POSTGRES_DB name the role and database the app uses. The
 # image's pg_dump 17 writes `SET transaction_timeout = 0;`, which PostgreSQL 16 rejects, so sed
-# drops that line before psql
+# drops that line before psql. It also opens the dump with \restrict, which psql reads from 13.22,
+# 14.19, 15.14, 16.10 and 17.6 on, and no 12 ever does: an older one stops there with "invalid command
+# \restrict" and loads nothing. The third command fails on such a psql before anything is renamed; a
+# postgres:16-alpine pulled before August 2025 is one. Pull it again and recreate the container on its
+# kept volume (compose: `docker compose --profile postgres pull postgres` and the `up -d` below;
+# dashboard-created: `docker pull postgres:16-alpine` and `docker rm -f openwa-postgres`, then start
+# OpenWA once so it creates the container again, and stop it), then run these commands again
 docker compose --profile postgres up -d postgres   # dashboard-created: docker start openwa-postgres
 docker exec openwa-postgres sh -c 'until pg_isready -q -U "$POSTGRES_USER"; do sleep 1; done'
+docker exec openwa-postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+  -c "\restrict openwa" -c "\unrestrict openwa"'
 docker exec openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
   -c "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO \"${POSTGRES_DB}_pre_restore_$(date +%Y%m%d%H%M%S)\"" \
   -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\""'
@@ -642,7 +650,8 @@ tar -xzOf "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz" ./database.sql | sed '/
   docker exec -i openwa-postgres sh -c 'psql --single-transaction -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 
 # An external PostgreSQL server: rename the upgraded database and create an empty one under the
-# DATABASE_NAME the app uses in the same way, then load the dump into it. DATABASE_URL is not an
+# DATABASE_NAME the app uses in the same way, then load the dump into it, with a psql that reads
+# \restrict as above (restore.sh refuses an older one on its PATH). DATABASE_URL is not an
 # OpenWA setting: fill in your own URL for that database, such as
 # postgres://<user>@<host>:5432/<database>, with the password in PGPASSWORD. With DATABASE_SSL=true,
 # run psql under PGSSLMODE=verify-full (require when DATABASE_SSL_REJECT_UNAUTHORIZED=false), as the
@@ -754,7 +763,9 @@ User-managed files outside that list (for example the project-level `.env`) must
 #                                                     POSTGRES_SCHEMA other than public is dumped
 #                                                     alone, and database.schema names it; that
 #                                                     dump needs pg_dump 14 or newer, and the
-#                                                     image ships 17)
+#                                                     image ships 17; loading a dump its
+#                                                     pg_dump makes needs psql 13.22, 14.19,
+#                                                     15.14, 16.10, 17.6 or newer, never a 12)
 #   - sessions/     — whatsapp-web.js state (SESSION_DATA_PATH)
 #   - baileys/      — Baileys credentials (BAILEYS_AUTH_DIR)
 #   - media/        — local media                    (STORAGE_LOCAL_PATH, archived whenever present; with
@@ -959,9 +970,18 @@ docker compose down
 #    The current database is kept under a new name, as the data dir is kept in data.pre-restore-<ts>,
 #    and an empty one takes its place. The container's own POSTGRES_USER and POSTGRES_DB name the
 #    role and database the app uses. The image's pg_dump 17 writes `SET transaction_timeout = 0;`,
-#    which PostgreSQL 16 rejects, so sed drops that line before psql
+#    which PostgreSQL 16 rejects, so sed drops that line before psql. It also opens the dump with
+#    \restrict, which psql reads from 13.22, 14.19, 15.14, 16.10 and 17.6 on, and no 12 ever does: an
+#    older one stops there with "invalid command \restrict" and loads nothing. The third command fails
+#    on such a psql before anything is renamed; a postgres:16-alpine pulled before August 2025 is one.
+#    Pull it again and recreate the container on its kept volume (compose: `docker compose --profile
+#    postgres pull postgres` and the `up -d` below; dashboard-created: `docker pull postgres:16-alpine`
+#    and `docker rm -f openwa-postgres`, then start OpenWA once so it creates the container again, and
+#    stop it), then run these commands again
 docker compose --profile postgres up -d postgres   # dashboard-created: docker start openwa-postgres
 docker exec openwa-postgres sh -c 'until pg_isready -q -U "$POSTGRES_USER"; do sleep 1; done'
+docker exec openwa-postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+  -c "\restrict openwa" -c "\unrestrict openwa"'
 docker exec openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
   -c "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO \"${POSTGRES_DB}_pre_restore_$(date +%Y%m%d%H%M%S)\"" \
   -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\""'
@@ -969,7 +989,8 @@ tar -xzOf ./backups/openwa-backup-<timestamp>.tar.gz ./database.sql | sed '/^SET
   docker exec -i openwa-postgres sh -c 'psql --single-transaction -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 
 #    An external PostgreSQL server: rename the current database and create an empty one under the
-#    DATABASE_NAME the app uses in the same way, then load the dump into it. DATABASE_URL is not an
+#    DATABASE_NAME the app uses in the same way, then load the dump into it, with a psql that reads
+#    \restrict as above (restore.sh refuses an older one on its PATH). DATABASE_URL is not an
 #    OpenWA setting: fill in your own URL for that database, such as
 #    postgres://<user>@<host>:5432/<database>, with the password in PGPASSWORD. With
 #    DATABASE_SSL=true, run psql under PGSSLMODE=verify-full (require when

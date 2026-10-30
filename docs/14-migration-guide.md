@@ -1012,7 +1012,11 @@ if [ -f "$BACKUP_DIR/database.sql" ]; then
     # at it. For an external server the script stops: rename the database and load the dump as step 3
     # of 11 - Runbook: Restore from Backup shows, then run steps 2-6 below by hand without this
     # PostgreSQL block: nothing after step 1 is restored yet. The upgraded database is kept under a
-    # _pre_restore_ name, and sed drops the pg_dump 17 line PostgreSQL 16 rejects.
+    # _pre_restore_ name, and sed drops the pg_dump 17 line PostgreSQL 16 rejects. A container psql too
+    # old for the dump's \restrict (older than 13.22, 14.19, 15.14, 16.10 or 17.6, or any 12) stops the
+    # script at the check before the rename, with nothing after step 1 restored: recreate the container
+    # from a fresh postgres:16-alpine as step 3 of 11 - Runbook: Restore from Backup says, then run this
+    # script again.
     if ! docker start openwa-postgres 2>/dev/null; then
         grep -qE '^DATABASE_HOST=(postgres|openwa-postgres)$' .env || {
             echo "External PostgreSQL: rollback INCOMPLETE, nothing after step 1 has been restored."
@@ -1023,6 +1027,8 @@ if [ -f "$BACKUP_DIR/database.sql" ]; then
         docker compose --profile postgres up -d postgres
     fi
     docker exec openwa-postgres sh -c 'until pg_isready -q -U "$POSTGRES_USER"; do sleep 1; done'
+    docker exec openwa-postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+      -c "\restrict openwa" -c "\unrestrict openwa"'
     docker exec openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
       -c "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO \"${POSTGRES_DB}_pre_restore_$(date +%Y%m%d%H%M%S)\"" \
       -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\""'

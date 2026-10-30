@@ -371,6 +371,38 @@ if [ -f "$STAGE/database.sql" ] && [ -f "$STAGE/database.schema" ]; then
   fi
 fi
 
+# pg_dump from 13.22, 14.19, 15.14, 16.10 and 17.6 on (the image ships 17) opens a plain dump with \restrict, a psql
+# meta-command no older psql knows, and no 12: such a psql stops there with "invalid command \restrict" and loads
+# nothing. The printed load runs the psql on PATH, so one that cannot read this dump stops the restore before
+# anything is written. Only the psql on PATH is checked, read without the load's arguments (Debian's
+# pg_wrapper may pick another client by them); with none, the printed text names the versions.
+psql_reads_restrict() {
+  local re='\) ([0-9]+)\.?([0-9]*)'
+  [[ $1 =~ $re ]] || return 1
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]:-0}"
+  case "$major" in
+    13) [ "$minor" -ge 22 ] ;;
+    14) [ "$minor" -ge 19 ] ;;
+    15) [ "$minor" -ge 14 ] ;;
+    16) [ "$minor" -ge 10 ] ;;
+    17) [ "$minor" -ge 6 ] ;;
+    *) [ "$major" -ge 18 ] ;;
+  esac
+}
+PSQL_RESTRICT=""
+if [ -f "$STAGE/database.sql" ] && grep -q '^\\restrict ' "$STAGE/database.sql"; then
+  PSQL_RESTRICT="psql 13.22, 14.19, 15.14, 16.10, 17.6 or newer (no 12)"
+  if command -v psql >/dev/null 2>&1; then
+    PSQL_VERSION="$(psql --version 2>&1 || true)"
+    if ! psql_reads_restrict "$PSQL_VERSION"; then
+      log "ERROR: the archive's PostgreSQL dump opens with \\restrict, which this psql cannot read: $PSQL_VERSION"
+      log "       the load needs $PSQL_RESTRICT; nothing has been restored yet. Install a newer"
+      log "       PostgreSQL client or put one first on PATH (the image ships 17), then re-run"
+      exit 1
+    fi
+  fi
+fi
+
 # Targets resolve exactly like the app: an explicit environment value, then ./.env, then the
 # dashboard's .env.generated, else the app's ./data defaults under OPENWA_DATA_DIR. They may
 # legitimately live outside it, where the environment or ./.env says so (see archive_target). The
@@ -711,6 +743,9 @@ if [ -f "$STAGE/database.sql" ]; then
     log "and a system CA store, which the image lacks)"
   fi
   log "(sed drops a setting this image's pg_dump 17 writes and PostgreSQL 16 rejects)"
+  if [ -n "$PSQL_RESTRICT" ]; then
+    log "(the load needs $PSQL_RESTRICT: the dump opens with \\restrict, where an older one stops and loads nothing)"
+  fi
 fi
 
 log "Restore complete. Start the app and confirm an existing API key still authenticates."
