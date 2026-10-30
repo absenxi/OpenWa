@@ -160,7 +160,8 @@ the clamps exist because a naive `delay * 2^attempt` reaches values
 
 **Why:** ten Chromium instances launching simultaneously on boot would hold the HTTP port closed
 for minutes; detaching from bootstrap means the API answers while engines warm.
-**Pinned by:** `session.service.spec.ts` (boot auto-start ordering/staggering cases).
+**Pinned by:** `session.service.spec.ts` (boot auto-start ordering/staggering cases; the stagger by
+'waits the full throttle between two auto-started launches').
 
 ---
 

@@ -11084,8 +11084,14 @@ describe('SessionService', () => {
     const autoStartRun = (): Promise<void> => (service as unknown as { autoStartRun: Promise<void> }).autoStartRun;
 
     const originalFlag = process.env.AUTO_START_SESSIONS;
+    // A sleep a case holds on node:timers/promises, the module object every test in the worker shares. It
+    // is released and restored here, so a case that fails or times out cannot leave it behind.
+    let heldSleep: { wake: () => void; spy: { mockRestore: () => void } } | undefined;
 
     afterEach(async () => {
+      heldSleep?.wake();
+      heldSleep?.spy.mockRestore();
+      heldSleep = undefined;
       if (originalFlag === undefined) delete process.env.AUTO_START_SESSIONS;
       else process.env.AUTO_START_SESSIONS = originalFlag;
       // Bootstrap always starts the (unref'd) liveness watchdog interval now — clear it so no
@@ -11135,6 +11141,40 @@ describe('SessionService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('waits the full throttle between two auto-started launches', async () => {
+      process.env.AUTO_START_SESSIONS = 'true';
+      (repository.find as jest.Mock).mockResolvedValue([
+        { id: 'a', name: 'A' },
+        { id: 'b', name: 'B' },
+      ]);
+      const startSpy = jest.spyOn(service, 'start').mockResolvedValue(undefined as never);
+      // The run sleeps through node:timers/promises, which fake timers do not reach, so its first sleep is held
+      // on the module object the service reads it from; any later one is the real sleep.
+      const timersPromises = jest.requireActual<{ setTimeout: (ms: number) => Promise<void> }>('node:timers/promises');
+      let wake: () => void = () => undefined;
+      const sleep = jest
+        .spyOn(timersPromises, 'setTimeout')
+        .mockImplementationOnce(() => new Promise<void>(resolve => (wake = resolve)));
+      heldSleep = { wake: () => wake(), spy: sleep };
+      const until = async (condition: () => boolean): Promise<void> => {
+        const deadline = Date.now() + 4_000;
+        while (!condition()) {
+          if (Date.now() > deadline) throw new Error('condition not reached');
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      };
+
+      service.onApplicationBootstrap();
+      await until(() => sleep.mock.calls.length === 1);
+      expect(sleep).toHaveBeenCalledWith(AUTOSTART_THROTTLE_MS);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+
+      wake();
+      await autoStartRun();
+      expect(startSpy).toHaveBeenCalledTimes(2);
+      expect(startSpy).toHaveBeenLastCalledWith('b');
     });
 
     it('keeps starting the remaining sessions when one fails', async () => {
