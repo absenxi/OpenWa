@@ -583,5 +583,20 @@ describe('Baileys disappearing timer changed around a chat deletion', () => {
 
       expect(store.getEphemeralExpiration(NEW)).toBeUndefined();
     });
+
+    it('gives a send to the phone alone no timer once the phone gains a second lid', () => {
+      const store = new BaileysSessionStore(undefined, SID, new FakeChatStateStore());
+      store.addLidMappings([{ lid: OLD, pn: PEER }]);
+      // While the phone maps to one lid, the old holder's change is cached under the phone too.
+      store.upsertChats([{ id: OLD, ephemeralExpiration: DAY, ephemeralSettingTimestamp: 1_800_000_100 }]);
+      expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
+      store.addLidMappings([{ lid: NEW, pn: PEER }]);
+      store.upsertChats([{ id: NEW, ephemeralExpiration: WEEK, ephemeralSettingTimestamp: 1_800_000_500 }]);
+
+      expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+      expect(store.getEphemeralExpiration('628111@c.us')).toBeUndefined();
+      expect(store.getEphemeralExpiration(OLD)).toBe(DAY);
+      expect(store.getEphemeralExpiration(NEW)).toBe(WEEK);
+    });
   });
 });

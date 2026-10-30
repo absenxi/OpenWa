@@ -393,21 +393,26 @@ export class BaileysSessionStore {
    */
   private timerKeys(chatId: string): Set<string> {
     const twins = this.chatTwins(chatId);
+    const own = parseWaId(chatId);
+    const keys = this.phoneOfManyLids(twins)
+      ? twins.filter(k => {
+          const id = parseWaId(k);
+          return id.kind === own.kind && id.userPart === own.userPart;
+        })
+      : twins;
+    return new Set(keys.flatMap(k => [k, this.toNeutralJid(k)]));
+  }
+
+  /** Whether the cache maps the phone among a chat's twins (its own number, or its lid's) to more than one lid. */
+  private phoneOfManyLids(twins: string[]): boolean {
     const phone = twins.find(k => parseWaId(k).kind === 'user');
-    const lidsOfPhone = new Set(
-      (phone ? this.chatTwins(phone) : [])
+    if (!phone) return false;
+    const lids = new Set(
+      this.chatTwins(phone)
         .map(k => parseWaId(k))
         .flatMap(id => (id.kind === 'lid' ? [id.userPart] : [])),
     );
-    const own = parseWaId(chatId);
-    const keys =
-      lidsOfPhone.size > 1
-        ? twins.filter(k => {
-            const id = parseWaId(k);
-            return id.kind === own.kind && id.userPart === own.userPart;
-          })
-        : twins;
-    return new Set(keys.flatMap(k => [k, this.toNeutralJid(k)]));
+    return lids.size > 1;
   }
 
   /**
@@ -987,6 +992,10 @@ export class BaileysSessionStore {
    * disappear. Folds a neutral `@c.us` id to the engine dialect first, like the other chat lookups.
    */
   getEphemeralExpiration(chatId: string): number | undefined {
+    // A phone the cache maps to more than one lid (a recycled number) names no one chat, so a send addressed to
+    // it alone carries no timer: what its keys hold was written for whichever holder came first.
+    const shared = this.phoneOfManyLids(this.chatTwins(chatId));
+    if (shared && parseWaId(chatId).kind === 'user') return undefined;
     // Prefer the timer learned from inbound messages (reliably present); try the raw, engine, and
     // neutral keys so an @lid-keyed entry and a phone-dialect send target resolve to the same value.
     const fromMessage = [chatId, this.toEngineJid(chatId), ...this.timerKeys(chatId)]
@@ -1000,7 +1009,7 @@ export class BaileysSessionStore {
       this.chats.get(chatId) ??
       this.chats.get(this.toEngineJid(chatId)) ??
       this.chats.get(this.toNeutralJid(chatId)) ??
-      this.chats.get(this.chatKey(chatId));
+      (shared ? undefined : this.chats.get(this.chatKey(chatId)));
     const exp = chat?.ephemeralExpiration;
     return typeof exp === 'number' && exp > 0 ? exp : undefined;
   }
