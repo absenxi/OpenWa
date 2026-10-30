@@ -178,9 +178,10 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
   /** When a failed write was last logged, on {@link now}, and how many have failed since without a line. */
   private readonly writeWarning = { at: -Infinity, held: 0 };
   /**
-   * Second-lid checks owed after the writes of the report that owed one failed, or its read did, until a write of
-   * that phone lands. A new check stays on its lid's {@link unsettledWrites} entry until a landed write queues it or
-   * every write of the lid has settled. Kept apart from the mapping cache and its eviction.
+   * Second-lid checks owed after the writes of the report that owed one failed, or its read did, or its read found
+   * the row no longer holding the phone this node still holds, until a write of that phone lands. A new check stays
+   * on its lid's {@link unsettledWrites} entry until a landed write queues it or every write of the lid has settled.
+   * Kept apart from the mapping cache and its eviction.
    */
   private readonly secondLidOwed = new Map<string, SecondLidCheck>();
   private readonly secondLidDropWarning = { at: -Infinity, held: 0 };
@@ -508,8 +509,9 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
         }
         if (sessionId && this.seenBy.get(lid) === reporters) reporters.add(sessionId);
       }
-      // A check owed again after its read failed is a copy no write already in flight carries. The lid's latest report
-      // takes it when it lands with that phone; an older one could run it before a newer write moves the row.
+      // A check owed again after its read failed, or found the row not holding its phone, is a copy no write already in
+      // flight carries. The lid's latest report takes it when it lands with that phone; an older one could run it
+      // before a newer write moves the row.
       const again = writing.latestReport === report ? this.secondLidOwed.get(lid) : undefined;
       if (owed && owed.phone === phone) this.queueSecondLid(lid, owed);
       if (again?.phone === phone) this.queueSecondLid(lid, again);
@@ -676,9 +678,9 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit, On
       const held = found[phone] ?? [];
       queued.forEach((newLid, i) => {
         if (!held.includes(newLid)) {
-          // Its row holds another phone by now. If this node still holds this one for it, the row is another node's or
-          // an older write that committed last (a pool can reorder commits): the next write of this phone to land
-          // checks it again.
+          // Its row holds another phone by now, or a conflicting display lookup marked it unreported. If this node
+          // still holds this phone for it, the row is another node's, an older write that committed last (a pool can
+          // reorder commits) or that lookup's: the next write of this phone to land checks it again.
           const check = lids.get(newLid);
           if (check && this.lidToPhone.get(newLid) === phone && !this.secondLidOwed.has(newLid))
             this.oweSecondLid(newLid, { ...check, queued: false });
