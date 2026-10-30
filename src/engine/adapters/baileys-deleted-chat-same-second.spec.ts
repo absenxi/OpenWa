@@ -533,4 +533,55 @@ describe('Baileys disappearing timer changed around a chat deletion', () => {
 
     expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
   });
+
+  it('a timer change set in the same second as the one applied is taken, as it arrived later', () => {
+    const store = timedChat();
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_799_000_000, ephemeralExpiration: null }]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+  });
+
+  it('an older record under the chat lid is dropped, and a newer one applied, for a lid mapped to its phone', () => {
+    const LID = '111111111111111@lid';
+    const store = timedChat();
+    store.addLidMappings([{ lid: LID, pn: PEER }]);
+    store.upsertChats([{ id: LID, ephemeralSettingTimestamp: 1_798_000_000, ephemeralExpiration: null }]);
+    expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
+
+    store.upsertChats([{ id: LID, ephemeralSettingTimestamp: 1_799_500_000, ephemeralExpiration: null }]);
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+    expect(store.getEphemeralExpiration(LID)).toBeUndefined();
+  });
+
+  // A recycled number: the old holder's lid and the new holder's lid both map to the phone.
+  describe('two lids the cache maps to one phone', () => {
+    const WEEK = 604_800;
+    const OLD = '111111111111111@lid';
+    const NEW = '222222222222222@lid';
+    function recycled() {
+      const store = new BaileysSessionStore(undefined, SID, new FakeChatStateStore());
+      store.addLidMappings([
+        { lid: OLD, pn: PEER },
+        { lid: NEW, pn: PEER },
+      ]);
+      return store;
+    }
+
+    it("takes each chat's own timer change, though the other set its timer later", () => {
+      const store = recycled();
+      store.upsertChats([{ id: OLD, ephemeralExpiration: DAY, ephemeralSettingTimestamp: 1_800_000_100 }]);
+      // The new holder's change, made earlier than the other chat's and delivered after it.
+      store.upsertChats([{ id: NEW, ephemeralExpiration: WEEK, ephemeralSettingTimestamp: 1_800_000_050 }]);
+
+      expect(store.getEphemeralExpiration(NEW)).toBe(WEEK);
+      expect(store.getEphemeralExpiration(OLD)).toBe(DAY);
+    });
+
+    it("does not read one holder's timer for the other", () => {
+      const store = recycled();
+      store.upsertChats([{ id: OLD, ephemeralExpiration: DAY, ephemeralSettingTimestamp: 1_800_000_100 }]);
+
+      expect(store.getEphemeralExpiration(NEW)).toBeUndefined();
+    });
+  });
 });

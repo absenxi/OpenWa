@@ -386,9 +386,28 @@ export class BaileysSessionStore {
     }
   }
 
-  /** The keys a chat's timer is cached under: every twin, raw and neutral. */
+  /**
+   * The keys a chat's timer is cached, compared and read under: every twin, raw and neutral. A phone the cache
+   * maps to more than one lid (a recycled number) belongs to no one chat, and through it one holder's timer would
+   * be read, compared and written as the other's, so then only the chat's own spellings are used.
+   */
   private timerKeys(chatId: string): Set<string> {
-    return new Set(this.chatTwins(chatId).flatMap(k => [k, this.toNeutralJid(k)]));
+    const twins = this.chatTwins(chatId);
+    const phone = twins.find(k => parseWaId(k).kind === 'user');
+    const lidsOfPhone = new Set(
+      (phone ? this.chatTwins(phone) : [])
+        .map(k => parseWaId(k))
+        .flatMap(id => (id.kind === 'lid' ? [id.userPart] : [])),
+    );
+    const own = parseWaId(chatId);
+    const keys =
+      lidsOfPhone.size > 1
+        ? twins.filter(k => {
+            const id = parseWaId(k);
+            return id.kind === own.kind && id.userPart === own.userPart;
+          })
+        : twins;
+    return new Set(keys.flatMap(k => [k, this.toNeutralJid(k)]));
   }
 
   /**
@@ -970,7 +989,7 @@ export class BaileysSessionStore {
   getEphemeralExpiration(chatId: string): number | undefined {
     // Prefer the timer learned from inbound messages (reliably present); try the raw, engine, and
     // neutral keys so an @lid-keyed entry and a phone-dialect send target resolve to the same value.
-    const fromMessage = [chatId, this.toEngineJid(chatId), ...this.chatTwins(chatId)]
+    const fromMessage = [chatId, this.toEngineJid(chatId), ...this.timerKeys(chatId)]
       .map(key => this.ephemeralByChat.get(key))
       .find(value => typeof value === 'number' && value > 0);
     if (typeof fromMessage === 'number' && fromMessage > 0) {
