@@ -58,6 +58,11 @@ const isStatusSeedOnReadyEnabled = (): boolean => process.env.STATUS_SEED_ON_REA
 export interface ReconnectState extends ReconnectAttemptState {
   /** The pending attempt's timer. Lives here, not in the policy, which stays free of side effects. */
   timer: NodeJS.Timeout | null;
+  /**
+   * The session row the armed timer re-initializes from: the one read by the report that armed it. A
+   * terminal unlink reported while the timer is armed clears its phone, the binding the next engine checks.
+   */
+  session?: Session;
   /** True while executeReconnect awaits its re-init: an engine failure reported then is parked, not applied. */
   initInFlight?: boolean;
   /** The failure parked during that window, applied or dropped by executeReconnect once init settles. */
@@ -1070,8 +1075,9 @@ export class SessionEngineLifecycle {
    * reconnect. The session row is re-read here rather than trusting a caller-held snapshot (the
    * watchdog detects death long after the last state change, and even the callback's closure
    * snapshot can be stale), so the reconnect re-initializes from the row read here, with the phone
-   * a terminal unlink clears already cleared. Never throws: a DB hiccup must not turn a disconnect
-   * into an unhandled rejection.
+   * a terminal unlink clears already cleared. A later report while that reconnect is armed leaves its
+   * timer and snapshot alone, except that a terminal unlink clears the phone on the armed snapshot
+   * too. Never throws: a DB hiccup must not turn a disconnect into an unhandled rejection.
    *
    * Concurrency fence: the caller has already gated entry on `isLiveEngine(id, engine)` against
    * the synchronous-callback window, but this handler awaits a DB read and (later) schedules work
@@ -1151,6 +1157,10 @@ export class SessionEngineLifecycle {
         // The phone is the account binding the next engine's onReady checks, and the clear just ended
         // it: the reconnect links whichever number scans its QR, as a start after a restart would.
         session = { ...session, phone: null };
+        // A reconnect already armed keeps its own snapshot (scheduleReconnect below leaves it alone), so the
+        // clear reaches that one too. Only the phone: the rest is what the report that armed it read.
+        const armed = this.reconnectStates.get(id);
+        if (armed?.timer && armed.session) armed.session = { ...armed.session, phone: null };
       }
     }
 
@@ -1324,10 +1334,11 @@ export class SessionEngineLifecycle {
       });
     }
 
+    state.session = session;
     state.timer = setTimeout(() => {
       // Spent: the attempt's own failure path schedules the next one through the guard above.
       state.timer = null;
-      void this.executeReconnect(id, session, state);
+      void this.executeReconnect(id, state.session ?? session, state);
     }, delay);
   }
 

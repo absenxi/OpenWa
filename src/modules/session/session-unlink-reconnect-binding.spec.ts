@@ -14,7 +14,7 @@ const OTHER = '628999';
  * on which path brings the next engine up: the automatic reconnect that shows the next QR, and a
  * start after a restart, both read a row whose phone the unlink cleared.
  */
-function fixture() {
+function fixture({ holdInitOf }: { holdInitOf?: number } = {}) {
   const stored: Session = {
     id: ID,
     name: 'unlinked',
@@ -34,13 +34,15 @@ function fixture() {
       return Promise.resolve({ affected: 1 });
     }),
   };
-  const engines: Array<{ callbacks?: EngineEventCallbacks }> = [];
+  const engines: Array<{ callbacks?: EngineEventCallbacks; rejectInit?: (error: Error) => void }> = [];
   const makeEngine = () => {
-    const record: { callbacks?: EngineEventCallbacks } = {};
-    engines.push(record);
+    const record: { callbacks?: EngineEventCallbacks; rejectInit?: (error: Error) => void } = {};
+    const index = engines.push(record) - 1;
     return {
       initialize: jest.fn((cb: EngineEventCallbacks) => {
         record.callbacks = cb;
+        // The engine `holdInitOf` names stays initializing until the case rejects it.
+        if (index === holdInitOf) return new Promise<void>((_, reject) => (record.rejectInit = reject));
         return Promise.resolve();
       }),
       getStatus: () => EngineStatus.QR_READY,
@@ -72,7 +74,7 @@ function fixture() {
   );
   const statusWrites = (status: SessionStatus): number =>
     repository.update.mock.calls.filter(([, patch]) => patch.status === status).length;
-  return { lifecycle, stored, engines, factory, statusWrites };
+  return { lifecycle, registry, stored, engines, factory, statusWrites };
 }
 
 describe('a different number linking after WhatsApp unlinked the session', () => {
@@ -117,6 +119,73 @@ describe('a different number linking after WhatsApp unlinked the session', () =>
 
     expect(f.statusWrites(SessionStatus.FAILED)).toBe(1);
     expect(f.stored.phone).toBe(BOUND);
+  });
+
+  // The liveness watchdog reports an engine that still reads READY, which arms the reconnect; that engine
+  // stays registered through the backoff and can then report the unlink itself.
+  it.each(['LOGOUT', 'logged out'])(
+    'is linked by a reconnect that was already pending when a %s report arrived',
+    async reason => {
+      const f = fixture();
+      await f.lifecycle.start(ID, { explicit: true });
+      await f.lifecycle.handleEngineDisconnected(ID, f.registry.get(ID)!, 'liveness probe failed (watchdog)');
+
+      f.engines[0].callbacks!.onDisconnected!(reason);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(f.stored.phone).toBeNull();
+
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(f.factory.create).toHaveBeenCalledTimes(2);
+      f.engines[1].callbacks!.onReady!(OTHER, 'New');
+      await jest.advanceTimersByTimeAsync(0);
+
+      expect(f.statusWrites(SessionStatus.FAILED)).toBe(0);
+      expect(f.stored.phone).toBe(OTHER);
+      expect(f.stored.status).toBe(SessionStatus.READY);
+    },
+  );
+
+  it('still refuses a different number after a drop that kept the binding arrived while a reconnect was pending', async () => {
+    const f = fixture();
+    await f.lifecycle.start(ID, { explicit: true });
+    await f.lifecycle.handleEngineDisconnected(ID, f.registry.get(ID)!, 'liveness probe failed (watchdog)');
+
+    f.engines[0].callbacks!.onDisconnected!('TIMEOUT');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(f.stored.phone).toBe(BOUND);
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(f.factory.create).toHaveBeenCalledTimes(2);
+
+    f.engines[1].callbacks!.onReady!(OTHER, 'New');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(f.statusWrites(SessionStatus.FAILED)).toBe(1);
+    expect(f.stored.phone).toBe(BOUND);
+  });
+
+  it('is linked by the next attempt after a reconnect attempt reported the unlink and then failed to initialize', async () => {
+    const f = fixture({ holdInitOf: 1 });
+    await f.lifecycle.start(ID, { explicit: true });
+    await f.lifecycle.handleEngineDisconnected(ID, f.registry.get(ID)!, 'liveness probe failed (watchdog)');
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(f.factory.create).toHaveBeenCalledTimes(2);
+
+    // The attempt's own engine reports the unlink while it initializes; then its init rejects, and its
+    // failure path reschedules with the row that attempt was started from.
+    f.engines[1].callbacks!.onDisconnected!('logged out');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(f.stored.phone).toBeNull();
+    f.engines[1].rejectInit!(new Error('connection closed'));
+    await jest.advanceTimersByTimeAsync(0);
+
+    await jest.advanceTimersByTimeAsync(120_000);
+    expect(f.factory.create).toHaveBeenCalledTimes(3);
+    f.engines[2].callbacks!.onReady!(OTHER, 'New');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(f.statusWrites(SessionStatus.FAILED)).toBe(0);
+    expect(f.stored.phone).toBe(OTHER);
+    expect(f.stored.status).toBe(SessionStatus.READY);
   });
 
   it('control: a start after the unlink links the different number', async () => {
