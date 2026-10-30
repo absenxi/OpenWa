@@ -208,9 +208,12 @@ function ChatComposer({
     const textToSend = messageInput.trim();
     if (!textToSend && !attachment) return;
 
-    // The field takes focus before the Send button disables (it does once the text is cleared): the browser drops
-    // focus from a disabled control to the page, and the next message would be typed nowhere.
-    textInputRef.current?.focus();
+    // A send from the composer (Enter in the field, or Send with focus) gives the field focus before the Send button
+    // disables (it does once the text is cleared): the browser drops focus from a disabled control to the page, and
+    // the next message would be typed nowhere. A send with focus elsewhere leaves it there, so a file sent alone from
+    // a tap does not raise a phone's keyboard.
+    const field = textInputRef.current;
+    if (field?.form?.contains(document.activeElement)) field.focus();
 
     // Text that cannot travel with an audio file stays in the input to be sent as its own message.
     if (!attachmentIsAudio) setMessageInput('');

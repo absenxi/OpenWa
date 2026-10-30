@@ -4690,3 +4690,26 @@ test('the media viewer stays on an image being sent when the engine confirms it 
   await flush();
   assert.equal(viewerSlideSrc(), src, 'the viewer closed by itself when the send it showed was confirmed');
 });
+
+// A file sent alone, from a tap that left nothing focused (a tap on a button does not focus it in Safari on iOS):
+// moving focus into the message field would raise a phone's keyboard over the thread for no typing.
+test('a file sent alone with nothing focused leaves focus where it was', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+  await stageAttachment(container, 'contract.pdf');
+  (document.activeElement as HTMLElement | null)?.blur();
+  assert.equal(document.activeElement === document.body, true, 'precondition: nothing focused');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => assert.ok(findFetchCall('POST', `/api/sessions/${SESSION.id}/messages/send-document`)));
+  await flush();
+  assert.equal(
+    document.activeElement?.getAttribute('placeholder') ?? 'body',
+    'body',
+    'the send moved focus into the message field',
+  );
+});
