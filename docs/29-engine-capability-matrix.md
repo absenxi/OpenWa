@@ -992,7 +992,7 @@ adapter boundary — none silently stubs.
   Baileys applies the write locally and the deleted chat would be listed again. Such a chat is not
   listed, and the four writes and a `sendSeen` without message ids resolve `false`, until a newer
   message re-creates it. A deletion synced on a reconnect is dated when it arrives, so a message
-  delivered in the same reconnect counts as older. A chat id not spelled the way the engine keys chats (`<id>@g.us`,
+  delivered in the same reconnect counts as older. A message whose second is earlier than the gateway's deletion date, because the gateway's clock runs ahead or a deletion made on the phone reaches it late, counts as older too. A chat id not spelled the way the engine keys chats (`<id>@g.us`,
   `<lid>@lid` or a phone jid, lowercase, with no device suffix), such as `120363@G.US` or a bare
   number, is served only by a message in memory: without one, the four writes and a `sendSeen` without
   message ids resolve `false`. With no usable message, clear and delete resolve `false`, and archive
