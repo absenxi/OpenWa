@@ -317,10 +317,17 @@ const MAX_DELIVERY_ID_LENGTH = 255;
  * Derives a DETERMINISTIC delivery id when the provider sends no dedup header, so a provider retry of
  * the same delivery dedups instead of being treated as new. A random UUID would silently disable both
  * the persist-dedup and BullMQ's jobId idempotency, causing duplicate downstream WhatsApp sends. Keyed
- * on pluginId + instanceId + route + rawBody ONLY — never a server timestamp, which would defeat dedup.
+ * on pluginId + instanceId + route + rawBody, plus the method and query when the body is empty; never a
+ * server timestamp, which would defeat dedup.
  */
 function deriveDeliveryId(req: IngressRequest): string {
-  return createHash('sha256').update([req.pluginId, req.instanceId, req.route, req.rawBody].join('\0')).digest('hex');
+  const parts = [req.pluginId, req.instanceId, req.route, req.rawBody];
+  // A delivery carried in the query string (a GET callback, a bodiless POST) is identified by its query: the
+  // empty body alone gave every one of them the same id, so all but the first were acked and dropped. Only that
+  // case adds it, so every other delivery keeps the id it had. Sorted by code point, not locale: the id is stored.
+  const query = Object.entries(req.query).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (req.rawBody === '' && query.length > 0) parts.push(req.method, JSON.stringify(query));
+  return createHash('sha256').update(parts.join('\0')).digest('hex');
 }
 
 /**
