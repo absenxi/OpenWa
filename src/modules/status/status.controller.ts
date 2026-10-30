@@ -53,6 +53,12 @@ export class StatusController {
     content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
   })
   @ApiResponse({ status: 404, description: 'No stored media (text status, omitted, or expired).' })
+  @ApiResponse({
+    status: 503,
+    description:
+      'On S3 storage, the gateway already has 50 media downloads open across the status and chat media ' +
+      'routes. Retry shortly.',
+  })
   async getStatusMedia(
     @Param('sessionId') sessionId: string,
     @Param('statusId') statusId: string,

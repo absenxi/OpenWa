@@ -1,8 +1,8 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Readable, PassThrough } from 'stream';
+import { Readable, PassThrough, finished } from 'stream';
 import {
   S3Client,
   S3ClientConfig,
@@ -58,6 +58,12 @@ export const S3_PROBE_TIMEOUT_MS = 10_000;
 export const S3_CONNECT_TIMEOUT_MS = 5_000;
 export const S3_SOCKET_TIMEOUT_MS = 30_000;
 
+/**
+ * Downloads open at once on the stream client, the SDK's pool size. Each holds a pooled socket until its
+ * stream finishes; one more would wait for a socket until three connect timeouts failed it, about 15 s.
+ */
+export const S3_MAX_OPEN_DOWNLOADS = 50;
+
 @Injectable()
 export class StorageService implements OnModuleDestroy {
   private readonly logger = createLogger('StorageService');
@@ -70,6 +76,7 @@ export class StorageService implements OnModuleDestroy {
    * own, a burst of downloads cannot leave the writes, deletes and listings on s3Client waiting for a socket.
    */
   private s3StreamClient: S3Client | null = null;
+  private s3OpenDownloads = 0;
   private s3Bucket = 'openwa';
   private s3KeyRoot = DEFAULT_S3_KEY_PREFIX;
   private s3Available = false;
@@ -322,13 +329,18 @@ export class StorageService implements OnModuleDestroy {
   /**
    * Open a file as a stream instead of reading it into memory, with the same key guard and S3
    * read-through as getFile. A missing or unreadable file rejects here rather than on the stream.
+   * On S3 a download past S3_MAX_OPEN_DOWNLOADS is refused at once with a 503.
    */
   async openFile(filePath: string): Promise<ExportFileSource> {
+    return this.openStoredFile(filePath, this.s3StreamClient);
+  }
+
+  private async openStoredFile(filePath: string, client: S3Client | null): Promise<ExportFileSource> {
     if (!isSafeStorageKey(filePath)) {
       throw new Error(`Refusing to read an unsafe storage key: ${filePath}`);
     }
     if (this.storageType === 's3' && this.s3Client && this.s3Available) {
-      return this.openS3File(filePath, this.s3StreamClient);
+      return this.openS3File(filePath, client);
     }
     return openLocalFile(this.localPath, filePath);
   }
@@ -449,9 +461,11 @@ export class StorageService implements OnModuleDestroy {
     // A listed key openFile would refuse (an S3 object named `..`, or one sitting exactly at the key
     // root) is left out here: the export fails on any open error other than a missing object, and a
     // key that can never be opened must not fail every export.
+    // Entries are read on s3Client, one at a time: the downloads' pool can be full, and the export must not
+    // fail behind it.
     return createExportStream(
       () => this.listExportableFiles(),
-      filePath => this.openFile(filePath),
+      filePath => this.openStoredFile(filePath, this.s3Client),
       this.logger,
     );
   }
@@ -552,6 +566,16 @@ export class StorageService implements OnModuleDestroy {
 
   private async openS3File(filePath: string, client: S3Client | null): Promise<ExportFileSource> {
     if (!client) throw new Error('S3 client not initialized');
+    // Only the stream client, whose pool serves the downloads, is bounded. Checked and taken before any await.
+    let held = client === this.s3StreamClient;
+    if (held && this.s3OpenDownloads >= S3_MAX_OPEN_DOWNLOADS) {
+      throw new ServiceUnavailableException('Too many media downloads are in progress; retry shortly');
+    }
+    if (held) this.s3OpenDownloads++;
+    const release = (): void => {
+      if (held) this.s3OpenDownloads--;
+      held = false;
+    };
 
     let response;
     try {
@@ -562,6 +586,7 @@ export class StorageService implements OnModuleDestroy {
         }),
       );
     } catch (error: unknown) {
+      release();
       // Read-through: media written while S3 was down lives only in the local fallback dir, so after
       // recovery a plain S3 read would split-brain (NoSuchKey even though the app served the file
       // fine during the outage). Fall through to the local copy; if there is none, surface the
@@ -578,9 +603,15 @@ export class StorageService implements OnModuleDestroy {
       return local;
     }
 
-    if (!response.Body) throw new Error('Empty response body');
-
-    return { stream: response.Body as Readable, size: response.ContentLength };
+    if (!response.Body) {
+      release();
+      throw new Error('Empty response body');
+    }
+    const stream = response.Body as Readable;
+    // Its socket goes back once the body is read to the end, fails, or is destroyed (a client that went away, or
+    // the idle timeout).
+    finished(stream, release);
+    return { stream, size: response.ContentLength };
   }
 
   private async putS3File(filePath: string, data: Buffer): Promise<void> {

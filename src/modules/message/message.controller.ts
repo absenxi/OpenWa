@@ -755,6 +755,12 @@ export class MessageController {
       '(the gateway stores none of those bytes, though on whatsapp-web.js the own-send echo may), or ' +
       'the message is not in this gateway’s history.',
   })
+  @ApiResponse({
+    status: 503,
+    description:
+      'On S3 storage, the gateway already has 50 media downloads open across the status and chat media ' +
+      'routes. Retry shortly.',
+  })
   async getChatMedia(
     @Param('sessionId') sessionId: string,
     @Param('chatId') chatId: string,

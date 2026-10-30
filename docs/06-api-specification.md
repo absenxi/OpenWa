@@ -1663,14 +1663,14 @@ conservative inert set (common image/video/audio types) and
 `application/octet-stream` otherwise — a document, or an `image/svg+xml`, is never served as active
 content on the API origin.
 
-The bytes are streamed from the store, with `Content-Length` when the store reports a size. On S3 a connection that moves no bytes for 30 seconds is cut, so a client that stops reading that long gets an aborted response. A store failure before the first byte answers `500`; one after it aborts the connection rather than end a short body.
+The bytes are streamed from the store, with `Content-Length` when the store reports a size. On S3 a connection that moves no bytes for 30 seconds is cut, so a client that stops reading that long gets an aborted response. A store failure before the first byte answers `500`; one after it aborts the connection rather than end a short body. On S3 one gateway process holds at most 50 media downloads open at once, shared by this route and the status media route; one more is refused at once with `503` rather than left waiting for a free connection to the store, so retry it shortly.
 
 **Errors:** `401` missing/invalid API key · `403` key not scoped to this session · `404`
 `No media stored for this message` — the message carries no media, `MEDIA_DOWNLOAD_ENABLED=false`
 or the media was above `MEDIA_DOWNLOAD_MAX_BYTES` when it was stored (the row holds a size-only
 marker), it was a URL-based API send (the gateway stores none of those bytes, though on
 whatsapp-web.js the own-send echo may), or the message is not in this gateway's history (e.g. history
-backfill, which is media-free)
+backfill, which is media-free) · `503` on S3, 50 media downloads already open; retry shortly
 
 Note: this is a three-path-segment route, so it never collides with the two-segment
 `GET /messages/:chatId/history` regardless of declaration order.
@@ -4500,11 +4500,11 @@ Stream a stored status's media bytes (the file behind a `mediaUrl` returned abov
 
 **Response** `200` — the raw media bytes as the response body, served as an **attachment** (`Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`). `Content-Type` is the essence of the stored mimetype (see below) when that is a single image, video or audio type other than `image/svg+xml`, which is scriptable despite the `image/` prefix, and `application/octet-stream` otherwise, so no stored status media is ever served as active content on the API origin. Streamed via `StreamableFile` from whatever backs `StorageService` (local disk or S3 — the route does not care which).
 
-The bytes are streamed from the store, with `Content-Length` when the store reports a size. On S3 a connection that moves no bytes for 30 seconds is cut, so a client that stops reading that long gets an aborted response. A store failure before the first byte answers `500`; one after it aborts the connection rather than end a short body.
+The bytes are streamed from the store, with `Content-Length` when the store reports a size. On S3 a connection that moves no bytes for 30 seconds is cut, so a client that stops reading that long gets an aborted response. A store failure before the first byte answers `500`; one after it aborts the connection rather than end a short body. On S3 one gateway process holds at most 50 media downloads open at once, shared by this route and the chat media route; one more is refused at once with `503` rather than left waiting for a free connection to the store, so retry it shortly.
 
 Only the essence of the stored mimetype is checked and served: the part before any `;`, trimmed and lowercased, since MIME types are case-insensitive. Parameters are dropped, and a value that is not a single well-formed type (a comma-joined list, for example) is served as `application/octet-stream`.
 
-**Errors:** `401` missing/invalid API key · `403` key not scoped to this session · `404` `Status media not found or expired` — the status is text-only, its media was omitted (e.g. over the configured size cap), or the 24h TTL has since purged the row
+**Errors:** `401` missing/invalid API key · `403` key not scoped to this session · `404` `Status media not found or expired` — the status is text-only, its media was omitted (e.g. over the configured size cap), or the 24h TTL has since purged the row · `503` on S3, 50 media downloads already open; retry shortly
 
 Note: `:statusId/media` is a two-path-segment route, so it never collides with the single-segment `GET /status/:id` above regardless of declaration order.
 
