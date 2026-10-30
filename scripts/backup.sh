@@ -300,7 +300,15 @@ pg_dump_data() {
     extensions+=(-e pgcrypto)
   fi
   pg_schema_prelude "$PG_DUMP_SCHEMA" "$pgcrypto"
-  pg_dump -n "$PG_DUMP_SCHEMA" --no-comments "${extensions[@]}" "$@"
+  # The trigram index moves to the end. It is built as the table owner, its expression calls unaccent in this
+  # schema, and when another role owns the schema pg_dump grants that owner USAGE on it only in its closing ACL
+  # pass, so in pg_dump's place the index stopped every load with "permission denied for schema". pg_dump writes
+  # it on one line, the name quoted only when it is a keyword. pipefail keeps a failed pg_dump fatal.
+  pg_dump -n "$PG_DUMP_SCHEMA" --no-comments "${extensions[@]}" "$@" | awk -v s="$PG_DUMP_SCHEMA" '
+    index($0, "CREATE INDEX idx_messages_body_trgm ON " s ".messages USING gin ") == 1 ||
+      index($0, "CREATE INDEX idx_messages_body_trgm ON \"" s "\".messages USING gin ") == 1 { held = $0; next }
+    { print }
+    END { if (held != "") print held }'
 }
 
 # Members the finished archive MUST contain (relative tar paths). A run that cannot stage any of

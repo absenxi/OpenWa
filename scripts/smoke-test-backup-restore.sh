@@ -100,8 +100,9 @@
 #   (av) a PostgreSQL POSTGRES_SCHEMA other than public, from the environment, ./.env or .env.generated, is
 #       dumped alone with its search extensions, and pgcrypto only when it lives in that schema, behind a prelude
 #       that drops none of them with CASCADE, for the DATABASE_URL branch too, and named in database.schema; public
-#       keeps the whole-database dump; a name the app refuses, a pg_dump older than 14, or a failed pgcrypto probe
-#       stops the backup before it dumps anything; restore prints the schema load, with the extensions' owner and
+#       keeps the whole-database dump, and the scoped one creates its trigram index last, after the schema grants;
+#       a name the app refuses, a pg_dump older than 14, a failed pgcrypto probe, or a failed dump fails the
+#       backup, the first three before it dumps anything; restore prints the schema load, with the extensions' owner and
 #       the way past another deployment's trigram index, only for a marked archive, in one transaction either way,
 #       and refuses a marker naming an invalid schema
 #
@@ -156,7 +157,7 @@ db_fingerprint() {
 # to shadow tar (simulating an incomplete archive) without touching the real scripts.
 populate_shim() {
   shim_dir="$1"
-  tools="env bash sh cp mv tar gzip mktemp date rm sed mkdir ls cat chmod grep printf uname dirname tr tail"
+  tools="env bash sh cp mv tar gzip mktemp date rm sed mkdir ls cat chmod grep printf uname dirname tr tail awk"
   if [ "${2:-}" = "with-sqlite3" ]; then
     tools="$tools sqlite3"
   fi
@@ -2934,6 +2935,15 @@ if [ "\$1" = --schema-only ]; then
 fi
 printf '%s|' "\$@" >"$AV/pg_dump-args"
 echo '-- dump'
+# In pg_dump's order: the trigram index, the schema grants, the closing \unrestrict. AV_QUOTE quotes the schema, as
+# pg_dump does a keyword.
+s=public
+[ "\$1" != -n ] || s="\$2"
+[ -z "\${AV_QUOTE:-}" ] || s="\"\$s\""
+echo "CREATE INDEX idx_messages_body_trgm ON \$s.messages USING gin (\$s.openwa_unaccent(body) \$s.gin_trgm_ops);"
+echo "GRANT ALL ON SCHEMA \$s TO app;"
+printf '%s\\n' '\\unrestrict key'
+[ -z "\${AV_DUMP_FAIL:-}" ] || exit 1
 EOF
 chmod +x "$AV/bin/pg_dump"
 # backup_av <.env content> <.env.generated content> [VAR=value...]: run a backup, leaving pg_dump's arguments in
@@ -2972,8 +2982,23 @@ if [ "$(tar -xzOf "$ARCHIVE_AV" ./database.schema)" != openwa_s ]; then
   fail "(av) the archive does not name the dumped schema in database.schema"
 fi
 AV_SQL="$(tar -xzOf "$ARCHIVE_AV" ./database.sql)"
-if ! grep -q "ALTER SCHEMA %I RENAME TO %I', 'openwa_s'" <<<"$AV_SQL" || [ "$(tail -n 1 <<<"$AV_SQL")" != '-- dump' ]; then
-  fail "(av) the schema dump does not start with the prelude that moves the schema aside: $AV_SQL"
+# The trigram index expression runs as the table owner, which pg_dump grants USAGE on a schema another role owns
+# only in its closing ACL pass, so the scoped dump creates that index last, quoted name or not; nothing else moves.
+AV_INDEX='CREATE INDEX idx_messages_body_trgm ON openwa_s.messages USING gin (openwa_s.openwa_unaccent(body) openwa_s.gin_trgm_ops);'
+if ! grep -q "ALTER SCHEMA %I RENAME TO %I', 'openwa_s'" <<<"$AV_SQL" ||
+  [ "$(tail -n 4 <<<"$AV_SQL" | tr '\n' '|')" != "-- dump|GRANT ALL ON SCHEMA openwa_s TO app;|\\unrestrict key|$AV_INDEX|" ]; then
+  fail "(av) the schema dump does not start with the prelude that moves the schema aside and end with its index: $AV_SQL"
+fi
+rc="$(backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_QUOTE=1)"
+if [ "$rc" -ne 0 ] || [ "$(tar -xzOf "$(ls "$AV"/out/openwa-backup-*.tar.gz)" ./database.sql | tail -n 2 | tr '\n' '|')" != \
+  "\\unrestrict key|${AV_INDEX//openwa_s./\"openwa_s\".}|" ]; then
+  fail "(av) a quoted schema name kept the trigram index before the grants (rc $rc): $OUT_AV"
+fi
+# The dump goes through a filter, and a pg_dump that fails still fails the backup, leaving no archive.
+backup_av '' "$AV_PG" POSTGRES_SCHEMA=openwa_s AV_DUMP_FAIL=1 >"$AV/rc"
+rc="$(cat "$AV/rc")"
+if [ "$rc" -eq 0 ] || ls "$AV"/out/openwa-backup-* >/dev/null 2>&1; then
+  fail "(av) a scoped pg_dump that failed did not fail the backup (rc $rc): $OUT_AV"
 fi
 # Another schema may use the extensions that move aside: the prelude drops them without CASCADE, so that use fails
 # the load instead of going with them, and drops the copy's own trigram index first. Without pgcrypto in the
@@ -3054,6 +3079,11 @@ for AV_PUBLIC in 'POSTGRES_SCHEMA=public\n' 'POSTGRES_SCHEMA=\n' ''; do
 done
 ARCHIVE_AV_WHOLE="$AV/whole.tar.gz"
 cp "$(ls "$AV"/out/openwa-backup-*.tar.gz)" "$ARCHIVE_AV_WHOLE"
+# The whole-database dump is pg_dump's output as written, its trigram index included.
+if [ "$(tar -xzOf "$ARCHIVE_AV_WHOLE" ./database.sql | tr '\n' '|')" != \
+  "-- dump|${AV_INDEX//openwa_s/public}|GRANT ALL ON SCHEMA public TO app;|\\unrestrict key|" ]; then
+  fail "(av) the whole-database dump is not pg_dump's output as written: $(tar -xzOf "$ARCHIVE_AV_WHOLE" ./database.sql)"
+fi
 # A name the app refuses, which pg_dump would fold or read as a pattern, and a line the scripts cannot parse,
 # stop the backup before pg_dump starts.
 for AV_BAD in 'POSTGRES_SCHEMA=OpenWA\n' 'POSTGRES_SCHEMA=openwa?\n' 'POSTGRES_SCHEMA=pg_openwa\n' \
