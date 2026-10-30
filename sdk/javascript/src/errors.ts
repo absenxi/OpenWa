@@ -126,8 +126,8 @@ export class OpenWANotImplementedError extends OpenWAApiError {}
  * the session's proxy. Each of these frees a keyed send's `Idempotency-Key` for the retry. A group
  * settings update with several fields applies them one at a time, so a 503 on a later field, a
  * throttle included, leaves the earlier ones applied; the message lists them after
- * `already applied:`, so re-read the settings before retrying, or send one field per request. A
- * timeout proves nothing: the write may still have been applied, and a keyed send keeps its key
+ * `already applied:`, so re-read the settings before retrying, or send one field per request. Any
+ * other timeout proves nothing: the write may still have been applied, and a keyed send keeps its key
  * taken. The non-idempotent sends (group create, channel create, media send) are deliberately left
  * unbounded by the gateway so a slow WhatsApp reply never answers one, and in a multi-node
  * deployment a forward that fails before reaching the owner node answers 503. A 503 from the owner

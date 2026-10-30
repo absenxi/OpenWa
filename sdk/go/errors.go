@@ -63,8 +63,8 @@ var (
 	// for the retry. A group settings update with several fields applies them
 	// one at a time, so a 503 on a later field, a throttle included, leaves the
 	// earlier ones applied; the message lists them after "already applied:", so
-	// re-read the settings before retrying, or send one field per request. A
-	// timeout proves nothing: the write may still have been applied, and a
+	// re-read the settings before retrying, or send one field per request. Any
+	// other timeout proves nothing: the write may still have been applied, and a
 	// keyed send keeps its key taken. The non-idempotent sends are deliberately
 	// left unbounded by the gateway so a slow WhatsApp reply never answers one,
 	// and in a multi-node deployment a forward that fails before reaching the
