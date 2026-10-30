@@ -208,7 +208,10 @@ Four tables live on the data connection, each created by a hand-authored dual-di
   attempt can declare `dedupOn: "body"` to key retries on the raw body instead: byte-identical bodies
   then collapse within `INGRESS_DEDUP_RETENTION_DAYS`, the persisted delivery id and the `{id}` ack
   token become that content hash, and a provider whose retries legitimately differ in the signed body
-  should keep the default, since `body` would dedup nothing for it. Freshness is enforced whenever a route declares
+  should keep the default, since `body` would dedup nothing for it. The same content hash is the delivery id
+  whenever no usable dedup header arrives; for an empty body it also covers the method and the query string, so
+  query-borne deliveries (a GET callback, a bodiless POST) stay apart, while deliveries with neither a body nor a
+  query share one id per route and collapse within the window. Freshness is enforced whenever a route declares
   `signature.timestampHeader`: the declared `toleranceSec` wins, and otherwise the host default
   (`INGRESS_TIMESTAMP_TOLERANCE_SEC`, default 300) applies — a declared timestamp is never accepted
   without a freshness check. Freshness alone is not replay protection, though: an **unsigned**
