@@ -353,6 +353,16 @@
         "always": "हमेशा"
       },
       "saveContactUnavailable": "ज्ञात फ़ोन नंबर चाहिए: इस चैट में केवल गोपनीयता आईडी (@lid) है।"
+    },
+    "templateTitle": "टेम्पलेट्स",
+    "templates": {
+      "title": "टेम्पलेट्स",
+      "searchPlaceholder": "टेम्पलेट्स खोजें...",
+      "empty": "कोई टेम्पलेट नहीं मिला",
+      "variablesTitle": "टेम्पलेट चर भरें",
+      "send": "टेम्पलेट भेजें",
+      "back": "वापस",
+      "loadError": "टेम्पलेट लोड करने में विफल"
     }
   },
   "errorBoundary": {

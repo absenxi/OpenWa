@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Plus, Send, Smile, X } from 'lucide-react';
-import { messageApi, type Chat, type MessageType } from '../../services/api';
+import { FileText, Loader2, Plus, Send, Smile, X } from 'lucide-react';
+import { messageApi, type Chat, type MessageTemplate, type MessageType } from '../../services/api';
 import { type ChatMessageView } from '../../utils/chatMessages';
 import { chatTitle } from '../../utils/formatPhone';
 import { buildMediaSendPayload, buildOptimisticMetadata, quotedIdOf } from '../../utils/composerSend';
@@ -11,6 +11,8 @@ import { useRole } from '../../hooks/useRole';
 import { useToast } from '../../hooks/useToast';
 import type { ScrollDirection } from '../../utils/scrollDecision';
 import { MEDIA_UPLOAD_MAX_BYTES } from '../../utils/mediaUpload';
+import { TemplatePickerModal } from './TemplatePickerModal';
+import { renderTemplatePreview } from '../../utils/templatePlaceholders';
 
 // Map an attachment MIME type to the neutral MessageType for the optimistic outgoing bubble, so the
 // placeholder matches what the backend will persist (e.g. a PDF is `document`, not `application`).
@@ -78,6 +80,7 @@ function ChatComposer({
   const attachmentIsAudio = attachment?.mimetype.startsWith('audio/') ?? false;
 
   const [showEmojiPicker, setShowEmojiPicker] = useState<boolean>(false);
+  const [showTemplatePicker, setShowTemplatePicker] = useState<boolean>(false);
   // Monotonic token invalidating an in-flight attachment FileReader: picking a second file (or
   // removing the attachment) before `onload` fires must win over the late-arriving bytes —
   // otherwise the slower read overwrites the newer pick. Same pattern as composeImageReadSeq.
@@ -200,6 +203,56 @@ function ChatComposer({
   const handleEmojiClick = (emoji: string) => {
     setMessageInput(prev => prev + emoji);
     setShowEmojiPicker(false);
+  };
+
+  const handleSendTemplate = async (template: MessageTemplate, vars?: Record<string, string>) => {
+    if (!selectedSessionId || !activeChat || sending) return;
+
+    setShowTemplatePicker(false);
+    setSending(true);
+
+    const renderedBody = renderTemplatePreview(template, vars);
+    const tempId = `temp_${Date.now()}`;
+    const tempMessage: ChatMessageView = {
+      id: tempId,
+      chatId: activeChat.id,
+      from: 'me',
+      to: activeChat.id,
+      body: renderedBody,
+      type: 'text',
+      direction: 'outgoing',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      metadata: {},
+    };
+
+    appendMessage(selectedSessionId, activeChat.id, tempMessage);
+    onMessageAppended('outgoing');
+
+    try {
+      const result = await messageApi.sendTemplate(selectedSessionId, {
+        chatId: activeChat.id,
+        templateId: template.id,
+        vars: vars && Object.keys(vars).length > 0 ? vars : undefined,
+      });
+
+      const sendKey = messagesQueryKey(selectedSessionId, activeChat.id);
+      const reconciled: ChatMessageView = {
+        ...tempMessage,
+        id: result.messageId || tempId.replace(/^temp_/, 'sent_'),
+        waMessageId: result.messageId || undefined,
+        status: 'sent',
+      };
+      upsertCachedMessage(queryClient, sendKey, reconciled, { dropId: tempId });
+
+      const sentAt = Math.floor(Date.now() / 1000);
+      onSent(selectedSessionId, activeChat.id, renderedBody, sentAt);
+    } catch (err) {
+      showErrorToast(t('chats.errors.send'), err instanceof Error ? err.message : undefined);
+      updateMessage(selectedSessionId, activeChat.id, tempId, { status: 'failed' });
+    } finally {
+      setSending(false);
+    }
   };
 
   // 7. Handle sending a message / media
@@ -391,6 +444,17 @@ function ChatComposer({
             <Plus size={24} />
           </button>
 
+          <button
+            type="button"
+            onClick={() => setShowTemplatePicker(true)}
+            disabled={!canWrite || sending || !selectedSessionId}
+            className="btn-input-accessory"
+            title={t('chats.templateTitle')}
+            aria-label={t('chats.templateTitle')}
+          >
+            <FileText size={22} />
+          </button>
+
           {/* The text field and the emoji toggle share one pill, as in WhatsApp. */}
           <div className="message-input-pill">
             <input
@@ -438,6 +502,17 @@ function ChatComposer({
           </button>
         </form>
       </footer>
+
+      {showTemplatePicker && selectedSessionId && (
+        <TemplatePickerModal
+          open={showTemplatePicker}
+          onClose={() => setShowTemplatePicker(false)}
+          sessionId={selectedSessionId}
+          canWrite={canWrite}
+          onSelect={handleSendTemplate}
+          sending={sending}
+        />
+      )}
     </>
   );
 }

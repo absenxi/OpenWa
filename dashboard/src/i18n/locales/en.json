@@ -353,6 +353,16 @@
         "always": "Always"
       },
       "saveContactUnavailable": "Needs a known phone number: this chat has only a privacy id (@lid)."
+    },
+    "templateTitle": "Templates",
+    "templates": {
+      "title": "Templates",
+      "searchPlaceholder": "Search templates...",
+      "empty": "No templates found",
+      "variablesTitle": "Fill Template Variables",
+      "send": "Send Template",
+      "back": "Back",
+      "loadError": "Failed to load templates"
     }
   },
   "errorBoundary": {

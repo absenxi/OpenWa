@@ -358,6 +358,16 @@
         "always": "Toujours"
       },
       "saveContactUnavailable": "Nécessite un numéro de téléphone connu : cette discussion n’a qu’un identifiant de confidentialité (@lid)."
+    },
+    "templateTitle": "Modèles",
+    "templates": {
+      "title": "Modèles",
+      "searchPlaceholder": "Rechercher des modèles...",
+      "empty": "Aucun modèle trouvé",
+      "variablesTitle": "Remplir les variables du modèle",
+      "send": "Envoyer le modèle",
+      "back": "Retour",
+      "loadError": "Échec du chargement des modèles"
     }
   },
   "errorBoundary": {

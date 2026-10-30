@@ -521,6 +521,15 @@ export interface SendPollPayload {
   allowMultipleAnswers?: boolean;
 }
 
+export interface SendTemplatePayload {
+  chatId: string;
+  templateId?: string;
+  templateName?: string;
+  vars?: Record<string, string>;
+  mentions?: string[];
+  linkPreview?: boolean;
+}
+
 export interface ForwardMessagePayload {
   fromChatId: string;
   toChatId: string;
@@ -1320,6 +1329,11 @@ export const messageApi = {
     }),
   sendPoll: (sessionId: string, data: SendPollPayload) =>
     request<MessageResponse>(`/sessions/${sessionId}/messages/send-poll`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendTemplate: (sessionId: string, data: SendTemplatePayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-template`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),

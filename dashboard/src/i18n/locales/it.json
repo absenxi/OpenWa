@@ -358,6 +358,16 @@
         "always": "Sempre"
       },
       "saveContactUnavailable": "Serve un numero di telefono noto: questa chat ha solo un ID privacy (@lid)."
+    },
+    "templateTitle": "Modelli",
+    "templates": {
+      "title": "Modelli",
+      "searchPlaceholder": "Cerca modelli...",
+      "empty": "Nessun modello trovato",
+      "variablesTitle": "Compila variabili modello",
+      "send": "Invia modello",
+      "back": "Indietro",
+      "loadError": "Impossibile caricare i modelli"
     }
   },
   "errorBoundary": {

@@ -353,6 +353,16 @@
         "always": "Selalu"
       },
       "saveContactUnavailable": "Memerlukan nomor telepon yang diketahui: obrolan ini hanya memiliki ID privasi (@lid)."
+    },
+    "templateTitle": "Templat",
+    "templates": {
+      "title": "Templat",
+      "searchPlaceholder": "Cari templat...",
+      "empty": "Tidak ada templat yang ditemukan",
+      "variablesTitle": "Isi variabel templat",
+      "send": "Kirim templat",
+      "back": "Kembali",
+      "loadError": "Gagal memuat templat"
     }
   },
   "errorBoundary": {
