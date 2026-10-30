@@ -351,6 +351,16 @@ export class BaileysMessaging {
     return confirmedWrite(work, this.queryBudgetMs, operation);
   }
 
+  /**
+   * Baileys sets no deadline on a media upload. A direct session uploads through Node's global agent, whose
+   * 5 s idle timeout ends a stalled upload; a session proxy's agent has none, so a proxy that holds the tunnel
+   * open and stops answering kept the send waiting for good. A request timeout replaces the agent's, so only a
+   * proxied session gets one: it would lengthen the direct session's bound.
+   */
+  private uploadTimeoutMs(): number | undefined {
+    return this.host.sessionProxyUrl() ? this.queryBudgetMs : undefined;
+  }
+
   /** Post-ensureReady socket handle. */
   private sock(expected?: WASocket): WASocket {
     const socket = this.host.getSocket();
@@ -389,7 +399,11 @@ export class BaileysMessaging {
     try {
       const { imageMessage } = await lib.prepareWAMessageMedia(
         { image },
-        { upload: this.sock().waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+        {
+          upload: this.sock().waUploadToServer,
+          mediaTypeOverride: 'thumbnail-link',
+          mediaUploadTimeoutMs: this.uploadTimeoutMs(),
+        },
       );
       if (!imageMessage) return {};
       return {
@@ -1074,9 +1088,11 @@ export class BaileysMessaging {
     }
     const message = typeof content === 'function' ? await content() : content;
     if (this.host.getSocketOrNull() !== sock) throw markNothingSent(new EngineNotReadyError());
+    const mediaUploadTimeoutMs = this.uploadTimeoutMs();
+    const sendOptions = mediaUploadTimeoutMs ? { ...options, mediaUploadTimeoutMs } : options;
     let sent: WAMessage | undefined;
     try {
-      sent = options ? await sock.sendMessage(jid, message, options) : await sock.sendMessage(jid, message);
+      sent = sendOptions ? await sock.sendMessage(jid, message, sendOptions) : await sock.sendMessage(jid, message);
     } catch (error) {
       if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
       throw mapSendRefusal(error);

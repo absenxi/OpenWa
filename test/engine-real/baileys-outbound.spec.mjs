@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as lib from '@whiskeysockets/baileys';
@@ -12,12 +13,13 @@ const { BaileysMessaging } = require('../../dist/engine/adapters/baileys-messagi
 const { BaileysSessionStore } = require('../../dist/engine/adapters/baileys-session-store.js');
 const { EngineNotSentError } = require('../../dist/common/errors/engine-not-sent.error.js');
 const { EngineNotReadyError } = require('../../dist/common/errors/engine-not-ready.error.js');
-const { BaileysLifecycle } = require('../../dist/engine/adapters/baileys-lifecycle.js');
+const { BaileysLifecycle, createProxyAgent } = require('../../dist/engine/adapters/baileys-lifecycle.js');
+const sharp = require('sharp');
 const PN = '6281111111111@s.whatsapp.net';
 const LID = '123456789012345@lid';
 const noop = () => undefined;
 
-function build(t, { lid = null, budget = 1000 } = {}) {
+function build(t, { lid = null, budget = 1000, proxyUrl } = {}) {
   const getLIDForPN = t.mock.fn(() => Promise.resolve(lid));
   const sock = {
     signalRepository: { lidMapping: { getLIDForPN, getPNForLID: () => Promise.resolve(PN) } },
@@ -41,7 +43,7 @@ function build(t, { lid = null, budget = 1000 } = {}) {
       wasDeletedForEveryone: () => false,
       pendingEditOf: noop,
       toUnixSeconds: ts => ts,
-      sessionProxyUrl: noop,
+      sessionProxyUrl: () => proxyUrl,
       loadLib: () => Promise.resolve(lib),
       putStoredMessage: noop,
       recordMessage: noop,
@@ -357,4 +359,121 @@ test('own presence is refused while the account has no name, as Baileys would ig
   const { sent, messaging } = linkedSocket(t);
   await assert.rejects(messaging.setOnlinePresence(true), EngineNotReadyError);
   assert.deepEqual(sent, []);
+});
+
+/** Far longer than the 1000 ms budget build() gives the messaging code, so a loaded machine cannot miss it. */
+const UPLOAD_BOUND_MS = 15_000;
+
+// A session egress proxy that opens the tunnel and then never answers through it, so the TLS handshake with the
+// media host never completes: HTTP CONNECT or SOCKS5, the two kinds createProxyAgent builds.
+function stalledProxy(t, scheme) {
+  const sockets = new Set();
+  const server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.on('error', noop);
+    const replies =
+      scheme === 'http'
+        ? [Buffer.from('HTTP/1.1 200 Connection Established\r\n\r\n')]
+        : [Buffer.from([5, 0]), Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 9])];
+    socket.on('data', () => {
+      const reply = replies.shift();
+      if (reply) socket.write(reply);
+    });
+  });
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise(resolve => server.close(resolve));
+  });
+  return new Promise(resolve =>
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ url: `${scheme}://127.0.0.1:${server.address().port}`, tunnels: () => sockets.size }),
+    ),
+  );
+}
+
+// The library's uploader, as the lifecycle wires it for a proxied session: fetchAgent is the proxy agent.
+function uploaderThrough(t, proxyUrl) {
+  const fetchAgent = createProxyAgent(proxyUrl);
+  t.after(() => fetchAgent.destroy());
+  return lib.getWAUploadToServer({ customUploadHosts: [], fetchAgent, logger: silent, options: {} }, () =>
+    Promise.resolve({
+      hosts: [{ hostname: '127.0.0.1:9', maxContentLengthBytes: 1e9 }],
+      auth: 'a',
+      ttl: 60,
+      fetchDate: new Date(),
+    }),
+  );
+}
+
+function outcomeWithin(work, ms) {
+  let timer;
+  return Promise.race([
+    work.then(
+      () => 'sent',
+      () => 'refused',
+    ),
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve('still waiting'), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+const previewImage = () =>
+  sharp({ create: { width: 64, height: 64, channels: 3, background: '#336699' } })
+    .jpeg()
+    .toBuffer();
+
+test('a preview image upload through a session proxy that stops answering ends, and the text goes out', async t => {
+  const image = await previewImage();
+  for (const scheme of ['http', 'socks5']) {
+    const proxy = await stalledProxy(t, scheme);
+    const { messaging, sock } = build(t, { proxyUrl: proxy.url });
+    sock.waUploadToServer = uploaderThrough(t, proxy.url);
+    const send = messaging.sendTextMessage(PN.replace('@s.whatsapp.net', '@c.us'), 'see https://example.com', [], {
+      customPreview: { url: 'https://example.com', title: 'Example', thumbnailBase64: image.toString('base64') },
+    });
+
+    assert.equal(await outcomeWithin(send, UPLOAD_BOUND_MS), 'sent', scheme);
+    assert.equal(proxy.tunnels(), 1, scheme);
+    const { linkPreview } = sock.sendMessage.mock.calls[0].arguments[1];
+    assert.equal(linkPreview.title, 'Example', scheme);
+    assert.equal(linkPreview.highQualityThumbnail, undefined, scheme);
+  }
+});
+
+test('a media send through a session proxy that stops answering fails within the bound', async t => {
+  const image = await previewImage();
+  const proxy = await stalledProxy(t, 'http');
+  const { messaging, sock } = build(t, { proxyUrl: proxy.url });
+  sock.waUploadToServer = uploaderThrough(t, proxy.url);
+  // What the library's sendMessage does before the relay: build the message, uploading its media.
+  sock.sendMessage = t.mock.fn((jid, content, options) =>
+    lib.generateWAMessage(jid, content, { logger: silent, userJid: PN, upload: sock.waUploadToServer, ...options }),
+  );
+
+  const send = messaging.sendImageMessage(PN.replace('@s.whatsapp.net', '@c.us'), {
+    data: image,
+    mimetype: 'image/jpeg',
+  });
+
+  assert.equal(await outcomeWithin(send, UPLOAD_BOUND_MS), 'refused');
+  assert.equal(proxy.tunnels(), 1);
+});
+
+test('a direct session leaves a stalled upload to the idle timeout of the agent it uploads through', async t => {
+  const image = await previewImage();
+  const { messaging, sock } = build(t);
+  const timeouts = [];
+  sock.waUploadToServer = (_path, { timeoutMs }) => {
+    timeouts.push(timeoutMs);
+    return Promise.reject(new Error('upload refused'));
+  };
+
+  await messaging.sendTextMessage(PN.replace('@s.whatsapp.net', '@c.us'), 'see https://example.com', [], {
+    customPreview: { url: 'https://example.com', title: 'Example', thumbnailBase64: image.toString('base64') },
+  });
+  await messaging.sendImageMessage(PN.replace('@s.whatsapp.net', '@c.us'), { data: image, mimetype: 'image/jpeg' });
+
+  assert.deepEqual(timeouts, [undefined]);
+  assert.equal(sock.sendMessage.mock.calls[1].arguments.length, 2);
 });
