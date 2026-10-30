@@ -211,268 +211,268 @@
     "coverageDirectory": "../coverage",
     "coverageThreshold": {
       "global": {
-        "branches": 54,
-        "functions": 68,
-        "lines": 60,
-        "statements": 61
+        "branches": 66,
+        "functions": 80,
+        "lines": 77,
+        "statements": 77
       },
       "./src/common/cache/": {
-        "branches": 70,
-        "functions": 75,
+        "branches": 72,
+        "functions": 76,
         "lines": 95,
         "statements": 91
       },
       "./src/common/security/": {
-        "branches": 85,
+        "branches": 87,
         "functions": 95,
         "lines": 93,
         "statements": 92
       },
       "./src/common/services/": {
-        "branches": 82,
-        "functions": 91,
-        "lines": 90,
-        "statements": 88
+        "branches": 92,
+        "functions": 93,
+        "lines": 94,
+        "statements": 94
       },
       "./src/common/storage/": {
-        "branches": 75,
-        "functions": 85,
-        "lines": 84,
-        "statements": 80
+        "branches": 83,
+        "functions": 89,
+        "lines": 91,
+        "statements": 88
       },
       "./src/common/utils/": {
-        "branches": 87,
+        "branches": 90,
         "functions": 92,
-        "lines": 92,
-        "statements": 92
+        "lines": 93,
+        "statements": 93
       },
       "./src/config/": {
-        "branches": 85,
-        "functions": 92,
-        "lines": 91,
-        "statements": 91
-      },
-      "./src/core/agent-tools/": {
-        "branches": 83,
-        "functions": 86,
-        "lines": 83,
-        "statements": 83
-      },
-      "./src/core/hooks/": {
-        "branches": 84,
-        "functions": 71,
-        "lines": 86,
-        "statements": 85
-      },
-      "./src/core/plugins/": {
-        "branches": 73,
-        "functions": 76,
-        "lines": 82,
-        "statements": 81
-      },
-      "./src/database/": {
-        "branches": 69,
-        "functions": 69,
-        "lines": 72,
-        "statements": 72
-      },
-      "./src/engine/adapters/": {
-        "branches": 78,
-        "functions": 85,
-        "lines": 86,
-        "statements": 86
-      },
-      "./src/engine/identity/": {
-        "branches": 85,
-        "functions": 86,
+        "branches": 88,
+        "functions": 94,
         "lines": 94,
         "statements": 93
       },
+      "./src/core/agent-tools/": {
+        "branches": 88,
+        "functions": 86,
+        "lines": 91,
+        "statements": 91
+      },
+      "./src/core/hooks/": {
+        "branches": 86,
+        "functions": 88,
+        "lines": 91,
+        "statements": 90
+      },
+      "./src/core/plugins/": {
+        "branches": 80,
+        "functions": 81,
+        "lines": 85,
+        "statements": 84
+      },
+      "./src/database/": {
+        "branches": 72,
+        "functions": 80,
+        "lines": 82,
+        "statements": 80
+      },
+      "./src/engine/adapters/": {
+        "branches": 84,
+        "functions": 89,
+        "lines": 91,
+        "statements": 90
+      },
+      "./src/engine/identity/": {
+        "branches": 88,
+        "functions": 93,
+        "lines": 95,
+        "statements": 93
+      },
       "./src/modules/audit/": {
-        "branches": 59,
-        "functions": 45,
-        "lines": 73,
-        "statements": 70
+        "branches": 75,
+        "functions": 63,
+        "lines": 85,
+        "statements": 85
       },
       "./src/modules/auth/": {
-        "branches": 76,
-        "functions": 85,
+        "branches": 83,
+        "functions": 92,
+        "lines": 92,
+        "statements": 91
+      },
+      "./src/modules/automation/": {
+        "branches": 78,
+        "functions": 93,
+        "lines": 93,
+        "statements": 92
+      },
+      "./src/modules/chat-media/": {
+        "branches": 84,
+        "functions": 87,
+        "lines": 95,
+        "statements": 93
+      },
+      "./src/modules/contact/": {
+        "branches": 83,
+        "functions": 92,
+        "lines": 93,
+        "statements": 93
+      },
+      "./src/modules/docker/": {
+        "branches": 87,
+        "functions": 93,
+        "lines": 94,
+        "statements": 93
+      },
+      "./src/modules/events/": {
+        "branches": 84,
+        "functions": 94,
+        "lines": 93,
+        "statements": 93
+      },
+      "./src/modules/group/": {
+        "branches": 80,
+        "functions": 70,
         "lines": 86,
         "statements": 86
       },
-      "./src/modules/automation/": {
-        "branches": 67,
-        "functions": 86,
-        "lines": 83,
-        "statements": 79
-      },
-      "./src/modules/chat-media/": {
-        "branches": 75,
-        "functions": 72,
-        "lines": 84,
-        "statements": 84
-      },
-      "./src/modules/contact/": {
-        "branches": 82,
-        "functions": 92,
-        "lines": 89,
-        "statements": 88
-      },
-      "./src/modules/docker/": {
-        "branches": 84,
-        "functions": 93,
-        "lines": 92,
-        "statements": 92
-      },
-      "./src/modules/events/": {
-        "branches": 72,
-        "functions": 84,
-        "lines": 84,
-        "statements": 82
-      },
-      "./src/modules/group/": {
-        "branches": 67,
-        "functions": 65,
-        "lines": 79,
-        "statements": 79
-      },
       "./src/modules/infra/": {
-        "branches": 75,
-        "functions": 76,
-        "lines": 89,
-        "statements": 88
+        "branches": 84,
+        "functions": 83,
+        "lines": 92,
+        "statements": 91
       },
       "./src/modules/integration/": {
-        "branches": 76,
-        "functions": 83,
-        "lines": 90,
-        "statements": 89
+        "branches": 80,
+        "functions": 87,
+        "lines": 91,
+        "statements": 90
       },
       "./src/modules/mcp/": {
         "branches": 62,
-        "functions": 76,
+        "functions": 80,
         "lines": 78,
         "statements": 78
       },
       "./src/modules/media/": {
-        "branches": 69,
-        "functions": 86,
-        "lines": 89,
-        "statements": 88
+        "branches": 82,
+        "functions": 92,
+        "lines": 93,
+        "statements": 92
       },
       "./src/modules/message/": {
-        "branches": 75,
-        "functions": 66,
-        "lines": 86,
-        "statements": 85
+        "branches": 82,
+        "functions": 80,
+        "lines": 90,
+        "statements": 90
       },
       "./src/modules/metrics/": {
-        "branches": 64,
-        "functions": 58,
-        "lines": 70,
-        "statements": 67
+        "branches": 82,
+        "functions": 92,
+        "lines": 91,
+        "statements": 92
       },
       "./src/modules/plugins/": {
-        "branches": 69,
-        "functions": 64,
-        "lines": 77,
-        "statements": 76
+        "branches": 76,
+        "functions": 82,
+        "lines": 86,
+        "statements": 86
       },
       "./src/modules/queue/": {
-        "branches": 74,
-        "functions": 81,
+        "branches": 76,
+        "functions": 88,
         "lines": 95,
         "statements": 95
       },
       "./src/modules/search/": {
-        "branches": 69,
-        "functions": 86,
-        "lines": 78,
-        "statements": 78
-      },
-      "./src/modules/session/": {
-        "branches": 75,
-        "functions": 79,
-        "lines": 88,
-        "statements": 87
-      },
-      "./src/modules/stats/": {
-        "branches": 67,
-        "functions": 63,
-        "lines": 78,
-        "statements": 76
-      },
-      "./src/modules/status-store/": {
-        "branches": 79,
-        "functions": 79,
-        "lines": 92,
-        "statements": 91
-      },
-      "./src/modules/status/": {
-        "branches": 70,
-        "functions": 60,
-        "lines": 83,
-        "statements": 82
-      },
-      "./src/modules/template/": {
-        "branches": 76,
-        "functions": 87,
+        "branches": 77,
+        "functions": 90,
         "lines": 91,
         "statements": 89
       },
-      "./src/modules/webhook/": {
-        "branches": 72,
+      "./src/modules/session/": {
+        "branches": 84,
         "functions": 89,
-        "lines": 90,
-        "statements": 87
+        "lines": 93,
+        "statements": 91
+      },
+      "./src/modules/stats/": {
+        "branches": 78,
+        "functions": 84,
+        "lines": 92,
+        "statements": 92
+      },
+      "./src/modules/status-store/": {
+        "branches": 84,
+        "functions": 80,
+        "lines": 93,
+        "statements": 92
+      },
+      "./src/modules/status/": {
+        "branches": 75,
+        "functions": 61,
+        "lines": 86,
+        "statements": 86
+      },
+      "./src/modules/template/": {
+        "branches": 77,
+        "functions": 88,
+        "lines": 95,
+        "statements": 94
+      },
+      "./src/modules/webhook/": {
+        "branches": 79,
+        "functions": 91,
+        "lines": 92,
+        "statements": 91
       },
       "./src/modules/call/": {
-        "branches": 62,
-        "functions": 57,
-        "lines": 82,
-        "statements": 79
+        "branches": 66,
+        "functions": 77,
+        "lines": 95,
+        "statements": 95
       },
       "./src/modules/catalog/": {
-        "branches": 68,
-        "functions": 88,
-        "lines": 89,
-        "statements": 87
+        "branches": 80,
+        "functions": 90,
+        "lines": 95,
+        "statements": 95
       },
       "./src/modules/channel/": {
-        "branches": 73,
-        "functions": 41,
-        "lines": 76,
-        "statements": 75
+        "branches": 74,
+        "functions": 62,
+        "lines": 85,
+        "statements": 85
       },
       "./src/modules/health/": {
         "branches": 77,
-        "functions": 66,
-        "lines": 90,
-        "statements": 87
+        "functions": 81,
+        "lines": 95,
+        "statements": 95
       },
       "./src/modules/label/": {
-        "branches": 39,
-        "functions": 42,
-        "lines": 45,
-        "statements": 44
-      },
-      "./src/modules/profile/": {
-        "branches": 65,
-        "functions": 84,
-        "lines": 88,
-        "statements": 85
-      },
-      "./src/modules/settings/": {
-        "branches": 50,
-        "functions": 0,
-        "lines": 85,
+        "branches": 78,
+        "functions": 59,
+        "lines": 80,
         "statements": 81
       },
+      "./src/modules/profile/": {
+        "branches": 68,
+        "functions": 85,
+        "lines": 95,
+        "statements": 95
+      },
+      "./src/modules/settings/": {
+        "branches": 62,
+        "functions": 50,
+        "lines": 94,
+        "statements": 95
+      },
       "./src/modules/takeover/": {
-        "branches": 74,
-        "functions": 70,
-        "lines": 85,
-        "statements": 83
+        "branches": 76,
+        "functions": 78,
+        "lines": 93,
+        "statements": 93
       }
     },
     "testEnvironment": "node",
