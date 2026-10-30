@@ -4713,3 +4713,41 @@ test('a file sent alone with nothing focused leaves focus where it was', async (
     'the send moved focus into the message field',
   );
 });
+
+/**
+ * Stage a file alone in Alice's chat, press Send the way `press` says (a pointer of that type, or a key), and answer
+ * the placeholder of what then holds focus, or 'body'.
+ */
+async function sendFileAlone(press: 'touch' | 'mouse' | 'key', tappedBefore = false): Promise<string> {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+  // A tap on + focuses the button in Chromium, so focus is inside the composer from here on.
+  (screen.getByRole('button', { name: 'Send file / image' }) as HTMLButtonElement).focus();
+  await stageAttachment(container, 'contract.pdf');
+  const send = screen.getByRole('button', { name: 'Send' });
+  if (tappedBefore) fireEvent.pointerDown(send, { pointerType: 'touch' });
+  if (press === 'key') fireEvent.keyDown(send, { key: 'Enter' });
+  else fireEvent.pointerDown(send, { pointerType: press });
+  send.focus();
+  fireEvent.click(send);
+  await waitFor(() => assert.ok(findFetchCall('POST', `/api/sessions/${SESSION.id}/messages/send-document`)));
+  await flush();
+  return document.activeElement?.getAttribute('placeholder') ?? 'body';
+}
+
+// In Chromium a tap focuses the button it hits; a focused message field would raise a phone's keyboard.
+test('a file sent alone by a tap on Send leaves the message field unfocused', async () => {
+  assert.notEqual(await sendFileAlone('touch'), 'Type a message...', 'the tap moved focus into the message field');
+});
+
+test('a file sent alone with a mouse click on Send leaves focus in the message field', async () => {
+  assert.equal(await sendFileAlone('mouse'), 'Type a message...');
+});
+
+test('a key on Send after an earlier tap on it leaves focus in the message field', async () => {
+  assert.equal(await sendFileAlone('key', true), 'Type a message...');
+});

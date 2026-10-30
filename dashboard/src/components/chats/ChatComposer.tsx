@@ -120,6 +120,8 @@ function ChatComposer({
   // References
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textInputRef = useRef<HTMLInputElement | null>(null);
+  // How the Send button was last pressed: the pointerdown's pointerType ('touch' for a tap), '' after a key on it.
+  const sendPressRef = useRef('');
 
   // Popular emojis
   const popularEmojis = [
@@ -208,12 +210,12 @@ function ChatComposer({
     const textToSend = messageInput.trim();
     if (!textToSend && !attachment) return;
 
-    // A send from the composer (Enter in the field, or Send with focus) gives the field focus before the Send button
-    // disables (it does once the text is cleared): the browser drops focus from a disabled control to the page, and
-    // the next message would be typed nowhere. A send with focus elsewhere leaves it there, so a file sent alone from
-    // a tap does not raise a phone's keyboard.
+    // With focus in the composer form, the field takes it before the Send button disables (it does once the text is
+    // cleared): the browser drops focus from a disabled control to the page, and the next message would be typed
+    // nowhere. Skipped when focus is outside the form, or when the Send button was last pressed by a tap: a tap focuses
+    // the button in Chromium, and a focused field raises a phone's keyboard.
     const field = textInputRef.current;
-    if (field?.form?.contains(document.activeElement)) field.focus();
+    if (sendPressRef.current !== 'touch' && field?.form?.contains(document.activeElement)) field.focus();
 
     // Text that cannot travel with an audio file stays in the input to be sent as its own message.
     if (!attachmentIsAudio) setMessageInput('');
@@ -422,6 +424,12 @@ function ChatComposer({
           <button
             type="submit"
             disabled={!canWrite || (!messageInput.trim() && !attachment) || sending}
+            onPointerDown={e => {
+              sendPressRef.current = e.pointerType;
+            }}
+            onKeyDown={() => {
+              sendPressRef.current = '';
+            }}
             className="btn-send-message"
             aria-label={t('chats.send')}
             title={t('chats.send')}
