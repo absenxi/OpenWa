@@ -964,8 +964,9 @@ export class WhatsAppWebJsAdapter implements IWhatsAppEngine {
     // Post-READY navigation window: window.WWebJS is gone until the re-inject completes, so every
     // delegate evaluate would die as a raw TypeError 500 (and five raw send failures latch the send
     // breaker for its 15-minute cooldown). Answer the same retryable 409 the pre-READY states get,
-    // naming the reload so the operator can tell this state from a plain disconnect (#1081).
-    if (this.lifecycle.isInNavigationReinjectWindow()) {
+    // naming the reload so the operator can tell this state from a plain disconnect (#1081). Past the
+    // window the same holds for a reloaded page a liveness probe has read without its helpers.
+    if (this.lifecycle.isInNavigationReinjectWindow() || this.lifecycle.isPageWithoutHelpers()) {
       throw new EngineNotReadyError(PAGE_RELOADING_MESSAGE);
     }
   }

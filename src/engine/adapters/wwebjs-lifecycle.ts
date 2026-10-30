@@ -295,6 +295,11 @@ export class WwebjsLifecycle {
    * current one.
    */
   private helpersMissingProbeAt = 0;
+  /**
+   * Set when a probe's helpers read ANSWERED no for the page now loaded, so any page call would die on it. A read that
+   * failed sets nothing: it says nothing about the helpers. Cleared by a yes, by the next navigation and by teardown.
+   */
+  private pageWithoutHelpers = false;
   /** The WhatsApp Web build this init asked whatsapp-web.js to pin, undefined when it asked for none.
    *  Compared against the build the page reports at READY (./wwebjs-running-build). */
   private requestedWebVersion: string | undefined;
@@ -854,6 +859,7 @@ export class WwebjsLifecycle {
       // The page this navigation replaces re-emitted 'ready' well after its own navigation, so it re-injected.
       const replacedPageReinjected = this.lastReadyAt - this.latestNavigationAt >= PREVIOUS_PAGE_READY_MS;
       this.latestNavigationAt = now;
+      this.pageWithoutHelpers = false;
       if (this.navigationEpisodeStartedAt === 0) this.navigationEpisodeStartedAt = now;
       this.lastMainFrameNavigationAt = now;
       const ready = this.status === EngineStatus.READY || this.status === EngineStatus.ACTION_REQUIRED;
@@ -1088,6 +1094,7 @@ export class WwebjsLifecycle {
     // stale stamp could grace the next generation's probe (single-use contract notwithstanding).
     this.clearNavigationReinjectWindow();
     this.reinjectUnverifiedSince = 0;
+    this.pageWithoutHelpers = false;
     const client = this.client;
     if (!client) return null;
 
@@ -1240,6 +1247,11 @@ export class WwebjsLifecycle {
     );
   }
 
+  /** Whether a probe found the page now loaded without whatsapp-web.js's helpers (see pageWithoutHelpers). */
+  isPageWithoutHelpers(): boolean {
+    return this.pageWithoutHelpers;
+  }
+
   private clearNavigationReinjectWindow(): void {
     this.lastMainFrameNavigationAt = 0;
     this.navigationEpisodeStartedAt = 0;
@@ -1273,15 +1285,17 @@ export class WwebjsLifecycle {
       connected = true;
       if (this.reinjectUnverifiedSince === 0) return true;
       helpersPending = true;
-      let found = false;
+      // Undefined while the read is pending, and after it failed.
+      let found: boolean | undefined;
       try {
         found = await this.pageHasWwebjsHelpers(client);
         return found;
       } finally {
         helpersPending = false;
         // A no or a failure answers for the page now loaded even when it lands after the deadline, so it is kept.
-        if (!found && this.client === client && navigationsBefore === this.navigationCount) {
+        if (found !== true && this.client === client && navigationsBefore === this.navigationCount) {
           this.helpersMissingProbeAt = startedAt;
+          if (found === false) this.pageWithoutHelpers = true;
         }
       }
     };
@@ -1341,6 +1355,7 @@ export class WwebjsLifecycle {
     if (navigationsBefore !== this.navigationCount) return;
     this.clearNavigationReinjectWindow();
     this.reinjectUnverifiedSince = 0;
+    this.pageWithoutHelpers = false;
   }
 
   /**
