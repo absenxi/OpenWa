@@ -6963,7 +6963,10 @@ and `cooldownSeconds` (default 60, `0` disables, max 86400) keeps the rule quiet
 fires. Be clear about what this guarantees: the cooldown **rate-bounds** an
 autoreply-vs-autoreply exchange with another bot, it does not terminate one — and
 `cooldownSeconds: 0` removes that bound entirely, so disable it only for rules whose conditions
-cannot match another bot's replies. The cooldown state is in-process: it resets on restart.
+cannot match another bot's replies. The cooldown state is in-process: it resets on restart. It is
+kept per chat id as the message arrives: one contact who writes under both the `<lid>@lid` and the phone
+form of a 1:1 chat can be answered once under each, because a lid's phone can belong to someone else
+after a number is reassigned, so the two forms are kept apart.
 
 #### POST /api/sessions/:sessionId/automation-rules
 
