@@ -102,7 +102,8 @@
 #       that drops none of them with CASCADE, for the DATABASE_URL branch too, and named in database.schema; public
 #       keeps the whole-database dump, and the scoped one creates its trigram index last, after the schema grants;
 #       a name the app refuses, a pg_dump older than 14, a failed pgcrypto probe, or a failed dump fails the
-#       backup, the first three before it dumps anything; restore prints the schema load, with the extensions' owner and
+#       backup, the first three before it dumps anything; restore prints the schema load, with the roles that can load
+#       it, the extensions' owner and
 #       the way past another deployment's trigram index, only for a marked archive, in one transaction either way,
 #       and refuses a marker naming an invalid schema
 #
@@ -3106,11 +3107,13 @@ if ! grep -q 'dump of schema openwa_s (POSTGRES_SCHEMA) present' <<<"$OUT_AV" ||
 fi
 # Dropping extensions that live in the schema takes their owner, and another OpenWA deployment's trigram index on
 # them refuses the load until that index is dropped: the printed text names both, and pgcrypto, which the dump
-# carries only when it lived in the schema.
+# carries only when it lived in the schema. The dump gives the schema's objects to the app's role before it grants
+# that role CREATE on a schema another role owns, which only a superuser's load gets past: the text says so.
 if ! grep -q 'when pg_trgm and unaccent live in that schema, owns them' <<<"$OUT_AV" ||
   ! grep -q 'dump carries it, which it does only when pgcrypto lived in that schema' <<<"$OUT_AV" ||
-  ! grep -q 'drop that index and load again' <<<"$OUT_AV"; then
-  fail "(av) restore did not name the extensions' owner or the way past another deployment's trigram index: $OUT_AV"
+  ! grep -q 'drop that index and load again' <<<"$OUT_AV" ||
+  ! grep -q 'When another role owns the schema, only a superuser can' <<<"$OUT_AV"; then
+  fail "(av) restore did not name the owners the load needs or the way past another deployment's trigram index: $OUT_AV"
 fi
 restore_av "$ARCHIVE_AV_WHOLE"
 if ! grep -q 'load it into an EMPTY database' <<<"$OUT_AV" || grep -q 'dump of schema' <<<"$OUT_AV" ||

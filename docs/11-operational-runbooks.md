@@ -651,11 +651,14 @@ tar -xzOf "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz" ./database.sql | sed '/
 # and sslrootcert=system needs libpq 16+ and a system CA store, which the image lacks. One transaction:
 # a load that fails leaves nothing behind. An archive holding database.schema (a POSTGRES_SCHEMA other
 # than public) has that schema only: skip the rename and the empty database and load it into the
-# database the app uses, as restore.sh prints, as a role that may create schemas and extensions there
-# and, when pg_trgm and unaccent live in that schema, owns them (the role that created them: the app's
-# own, or the one an earlier load ran as), or as a superuser. The same goes for pgcrypto when the dump
-# carries it, which it does only when pgcrypto lived in that schema (PostgreSQL 12 or older, where the
-# app creates it there for its ids). It moves the current copy of the schema aside as
+# database the app uses, as restore.sh prints, as the app's role, or a member of it, that may create
+# schemas and extensions there and, when pg_trgm and unaccent live in that schema, owns them (the role
+# that created them: the app's own, or the one an earlier load ran as), or as a superuser. The same
+# goes for pgcrypto when the dump carries it, which it does only when pgcrypto lived in that schema
+# (PostgreSQL 12 or older, where the app creates it there for its ids). When another role owns the
+# schema, only a superuser can load it: the dump gives what is in it to the app's role before it
+# grants that role CREATE on the schema. After ALTER SCHEMA <schema> OWNER TO <app role>, a new
+# backup loads as that role. It moves the current copy of the schema aside as
 # <schema>_pre_restore_<time>, rows and all, and leaves the other schemas alone; pg_trgm and unaccent,
 # when they live in it, are dropped from the copy with its trigram index (idx_messages_body_trgm), and
 # such a pgcrypto with the copy's id column defaults, so the dump can create them again. A load that
@@ -976,23 +979,26 @@ tar -xzOf ./backups/openwa-backup-<timestamp>.tar.gz ./database.sql | sed '/^SET
 #    and a system CA store, which the image lacks. One transaction: a load that fails leaves nothing
 #    behind. An archive holding database.schema (a POSTGRES_SCHEMA other than public) has that schema
 #    only: skip the rename and the empty database and load it into the database the app uses, as
-#    restore.sh prints, as a role that may create schemas and extensions there and, when pg_trgm and
-#    unaccent live in that schema, owns them (the role that created them: the app's own, or the one
-#    an earlier load ran as), or as a superuser. The same goes for pgcrypto when the dump carries it,
-#    which it does only when pgcrypto lived in that schema (PostgreSQL 12 or older, where the app
-#    creates it there for its ids). It moves the current copy of the schema aside as
-#    <schema>_pre_restore_<time>, rows and all, and leaves the other schemas alone; pg_trgm and
-#    unaccent, when they live in it, are dropped from the copy with its trigram index
-#    (idx_messages_body_trgm), and such a pgcrypto with the copy's id column defaults, so the dump can
-#    create them again. A load that stops at "cannot drop extension" means another schema uses them and
-#    nothing was changed; its DETAIL lines name what. When that is another OpenWA deployment's
-#    idx_messages_body_trgm, drop that index and load again: that deployment's contains search then
-#    reads its whole messages table until its next start builds the index again, and answers 501 while
-#    it builds. Drop anything else named first and recreate it after the load. Into an empty database,
-#    an extension it uses (pg_trgm, unaccent) that lives in another application's schema has to exist
-#    first, and on PostgreSQL 12 or older so does a pgcrypto that lived outside the app's schema, in the
-#    schema it lived in (the dump leaves that one out). A pgcrypto that lived in the app's schema is
-#    created by the load: do not create it first
+#    restore.sh prints, as the app's role, or a member of it, that may create schemas and extensions
+#    there and, when pg_trgm and unaccent live in that schema, owns them (the role that created them:
+#    the app's own, or the one an earlier load ran as), or as a superuser. The same goes for pgcrypto
+#    when the dump carries it, which it does only when pgcrypto lived in that schema (PostgreSQL 12
+#    or older, where the app creates it there for its ids). When another role owns the schema, only a
+#    superuser can load it: the dump gives what is in it to the app's role before it grants that role
+#    CREATE on the schema. After ALTER SCHEMA <schema> OWNER TO <app role>, a new backup loads as
+#    that role. It moves the current copy of the schema aside as <schema>_pre_restore_<time>, rows
+#    and all, and leaves the other schemas alone; pg_trgm and unaccent, when they live in it, are
+#    dropped from the copy with its trigram index (idx_messages_body_trgm), and such a pgcrypto with
+#    the copy's id column defaults, so the dump can create them again. A load that stops at "cannot
+#    drop extension" means another schema uses them and nothing was changed; its DETAIL lines name
+#    what. When that is another OpenWA deployment's idx_messages_body_trgm, drop that index and load
+#    again: that deployment's contains search then reads its whole messages table until its next
+#    start builds the index again, and answers 501 while it builds. Drop anything else named first
+#    and recreate it after the load. Into an empty database, an extension it uses (pg_trgm, unaccent)
+#    that lives in another application's schema has to exist first, and on PostgreSQL 12 or older so
+#    does a pgcrypto that lived outside the app's schema, in the schema it lived in (the dump leaves
+#    that one out). A pgcrypto that lived in the app's schema is created by the load: do not create
+#    it first
 tar -xzOf ./backups/openwa-backup-<timestamp>.tar.gz ./database.sql | sed '/^SET transaction_timeout = 0;$/d' |
   psql --single-transaction -v ON_ERROR_STOP=1 "$DATABASE_URL"
 
