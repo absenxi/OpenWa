@@ -292,6 +292,15 @@ curl -X POST 'http://localhost:2785/api/infra/storage/import' \
   -H 'X-API-Key: YOUR_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"filePath": "data/exports/storage-export-xxx.tar.gz"}'
+
+# Step 6 (Local to S3): clean up STORAGE_LOCAL_PATH. On S3 the store still reads that directory as its
+#   fallback: what is left there is listed, served when the bucket has no copy, and archived by
+#   scripts/backup.sh. Media written between Step 2 and Step 4, and any file whose import failed, live
+#   there alone, so never empty it outright. Once Step 5 answers "failed": 0, stop the sessions and
+#   run Steps 2 and 5 again: on S3 the export reads the local directory too, so this copies what only
+#   it held into the bucket. When that import also answers "failed": 0, move the directory's contents
+#   aside (keep the directory: writes land there while the bucket is down). Or delete only the local
+#   files whose key the bucket already holds.
 ```
 
 | Scenario                     | Support | Method                   |

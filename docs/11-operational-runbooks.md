@@ -769,8 +769,11 @@ User-managed files outside that list (for example the project-level `.env`) must
 #   - sessions/     — whatsapp-web.js state (SESSION_DATA_PATH)
 #   - baileys/      — Baileys credentials (BAILEYS_AUTH_DIR)
 #   - media/        — local media                    (STORAGE_LOCAL_PATH, archived whenever present; with
-#                                                     STORAGE_TYPE=s3 it holds only files the app could not
-#                                                     write to the bucket, so back up the bucket separately)
+#                                                     STORAGE_TYPE=s3 it holds the files the app could not
+#                                                     write to the bucket and, after a move from local
+#                                                     storage, the old local media until 14 - Migration
+#                                                     Guide (Storage Migration, Step 6) cleans it up, so
+#                                                     back up the bucket separately)
 #   - plugin-packages/ — installed plugin code from PLUGINS_DIR
 #                        (not packages in a legacy ./plugins, which the app still loads while
 #                        PLUGINS_DIR is unset; backup.sh warns about those)
