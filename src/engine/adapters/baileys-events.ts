@@ -1403,8 +1403,10 @@ export class BaileysEvents {
       }
       const user = this.host.getSocketOrNull()?.user;
       const own = [user?.id, user?.lid].filter((jid): jid is string => !!jid).map(withoutDevice);
-      // A lid is also tried as the phone number it maps to: a message written under phone addressing can
-      // be edited under lid addressing, and the key names each party the way its own client did.
+      // The account's own lid is also tried as its phone number: a message written under phone addressing can
+      // be edited under lid addressing, and the key names each party the way its own client did. Only that lid
+      // resolves here (host.toNeutralJid keeps a contact's lid as a lid); a contact's phone form is tried only
+      // when the key carries it as remoteJidAlt or participantAlt (senderForms).
       const withPhone = (forms: string[]): string[] =>
         forms.flatMap(jid => {
           const neutral = jid.endsWith('@lid') ? this.host.toNeutralJid(jid) : '';
