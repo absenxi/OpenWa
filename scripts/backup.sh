@@ -8,9 +8,10 @@
 #   - sessions/     — whatsapp-web.js LocalAuth session data
 #   - baileys/      — Baileys engine authentication state
 #   - media/        — the local media dir (STORAGE_LOCAL_PATH), archived whenever it exists. Under
-#                     STORAGE_TYPE=s3 it holds only media the app could not write to the bucket
-#                     (unreachable, or no credentials); the bucket's contents are not archived and
-#                     need a backup of their own
+#                     STORAGE_TYPE=s3 it holds media the app could not write to the bucket
+#                     (unreachable, or no credentials) and, after a move from local storage, the
+#                     old local media until docs/14 Storage Migration Step 6 cleans it up;
+#                     the bucket's contents are not archived and need a backup of their own
 #   - plugin-packages/ — installed plugin packages from PLUGINS_DIR
 #   - plugin-state/    — registry and persisted ctx.storage state under PLUGIN_STATE_DIR/plugins
 #                        (default: <data dir>/plugins)
