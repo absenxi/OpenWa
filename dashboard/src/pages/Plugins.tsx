@@ -858,14 +858,20 @@ export default function Plugins() {
       refetchAll();
       void loadCatalog();
       // The server ships with this page, so any answer but its plain one reports work left behind (a registry entry
-      // the uninstall could not drop), and with the card gone the answer is all that is left to say so.
+      // the uninstall could not drop), and with the card gone the answer is all that is left to say so. It stays until
+      // closed: it names the call left to make, and is too long to read before a timed toast leaves.
       if (res.message === `Plugin ${plugin.id} uninstalled successfully`) {
         toast.success(
           t('plugins.toasts.uninstalled', 'Plugin uninstalled'),
           localizePlugin(plugin, i18n.language).name,
         );
       } else {
-        toast.warning(t('plugins.toasts.uninstalledWithWarning'), res.message);
+        toast.addToast({
+          type: 'warning',
+          title: t('plugins.toasts.uninstalledWithWarning'),
+          message: res.message,
+          duration: 0,
+        });
       }
     } catch (err) {
       toast.error(t('plugins.toasts.uninstallFailed', 'Uninstall failed'), err instanceof Error ? err.message : '');
