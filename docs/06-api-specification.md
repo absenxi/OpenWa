@@ -7216,7 +7216,7 @@ The client must authenticate during the Socket.IO handshake. Two sources are acc
 
 > The former `?apiKey=<key>` query fallback was **removed** — it leaked the credential into proxy/access logs. Pass the key via the handshake `auth` field or the `x-api-key` header only.
 
-If no key is supplied, or validation fails, the server emits an `error` message (`code: "UNAUTHORIZED"`) on the `message` event and immediately disconnects the socket. CORS for the namespace reuses the HTTP `CORS_ORIGINS` policy (dev allows any origin; production uses the allowlist).
+If no key is supplied, or the key is refused, the server emits an `error` message (`code: "UNAUTHORIZED"`) on the `message` event and immediately disconnects the socket. If the key could not be checked because its key store failed, the error is `INTERNAL_ERROR` instead, also followed by a disconnect; the key was not judged, so the client may reconnect with it. CORS for the namespace reuses the HTTP `CORS_ORIGINS` policy (dev allows any origin; production uses the allowlist).
 
 ### Protocol — client → server
 
