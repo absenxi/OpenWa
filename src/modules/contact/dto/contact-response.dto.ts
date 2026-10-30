@@ -8,8 +8,9 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export class ContactDto {
   @ApiProperty({
     description:
-      "Contact id in the active engine's native format. On Baileys this is frequently an `@lid` " +
-      'rather than a phone-number JID; use GET /contacts/{contactId}/phone to resolve one.',
+      'Contact id in the neutral form both engines return (`<phone>@c.us`, never `@s.whatsapp.net`). On ' +
+      'Baileys this is frequently an `@lid` rather than a phone-number JID; use GET /contacts/{contactId}/phone ' +
+      'to resolve one.',
     example: '628123456789@c.us',
   })
   id!: string;

@@ -15,7 +15,7 @@ export const MUTE_UNTIL_MAX = Number.MAX_SAFE_INTEGER;
 export class MuteChatDto {
   @ApiProperty({
     maxLength: CHAT_ID_MAX_LENGTH,
-    description: "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+    description: 'Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890-123@g.us)',
     example: '1234567890-123@g.us',
   })
   @ToStrictString()
