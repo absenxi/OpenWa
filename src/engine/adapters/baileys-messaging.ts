@@ -1183,7 +1183,8 @@ export class BaileysMessaging {
    * not-found here, not a cross-chat write (a pin sent into chat A referencing chat B's message, or
    * a star indexed under the wrong conversation, would report success). Both sides are neutralized
    * so @c.us/@s.whatsapp.net (and a known lid<->pn twin) compare equal, and a received broadcast-list
-   * message is found under the sender chat it is reported in.
+   * message is found under the sender chat it is reported in. Every caller checks before it writes, so
+   * the not-found carries markNothingSent (the lid query it may run writes no message).
    */
   private async assertStoredInChat(
     target: WAMessage,
@@ -1217,7 +1218,7 @@ export class BaileysMessaging {
         }
       }
     }
-    throw new MessageNotFoundError(messageId, chatId);
+    throw markNothingSent(new MessageNotFoundError(messageId, chatId));
   }
 
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {

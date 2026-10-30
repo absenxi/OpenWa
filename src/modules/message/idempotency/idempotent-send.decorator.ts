@@ -11,8 +11,8 @@ export const IDEMPOTENCY_KEY_HEADER_DESCRIPTION =
   'Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine ' +
   'proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate ' +
   'limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a ' +
-  'recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold, or a ' +
-  'connection replaced before the message was written.';
+  'recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds ' +
+  'under another chat, or a connection replaced before the message was written.';
 
 /**
  * Marks a send route as accepting the opt-in `Idempotency-Key` header: wires the interceptor and

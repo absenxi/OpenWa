@@ -3,7 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { BadRequestException, ExecutionContext } from '@nestjs/common';
 import { from, lastValueFrom } from 'rxjs';
-import type { WASocket } from '@whiskeysockets/baileys';
+import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
 import { MessageSendService } from '../../modules/message/message-send.service';
 import { Message } from '../../modules/message/entities/message.entity';
 import { SessionService } from '../../modules/session/session.service';
@@ -32,10 +32,12 @@ describe('a keyed Baileys send refused before its message is built', () => {
   let sock: { onWhatsApp: jest.Mock; sendMessage: jest.Mock };
 
   let body: SendTextMessageDto;
+  let stored: WAMessage | null;
 
   beforeEach(async () => {
     process.env.SIMULATE_TYPING = 'false';
     body = { chatId: '628123456789@c.us', text: 'hello' };
+    stored = null;
     sock = {
       onWhatsApp: jest.fn().mockResolvedValue([]),
       sendMessage: jest.fn().mockResolvedValue({ key: { id: 'M1' }, messageTimestamp: 1 }),
@@ -57,13 +59,16 @@ describe('a keyed Baileys send refused before its message is built', () => {
       rememberOwnSend: () => undefined,
       recordLidMapping: () => undefined,
       getOnMessageCreate: () => undefined,
-      getStoredMessage: () => Promise.resolve(null),
+      getStoredMessage: () => Promise.resolve(stored),
+      pendingEditOf: () => undefined,
       wasDeletedForEveryone: () => false,
     } as unknown as BaileysMessagingHost;
     const messaging = new BaileysMessaging(host);
     const engines = new EngineRegistry();
     engines.set('sess-1', {
       sendTextMessage: (...args: Parameters<BaileysMessaging['sendTextMessage']>) => messaging.sendTextMessage(...args),
+      replyToMessage: (...args: Parameters<BaileysMessaging['replyToMessage']>) => messaging.replyToMessage(...args),
+      forwardMessage: (...args: Parameters<BaileysMessaging['forwardMessage']>) => messaging.forwardMessage(...args),
     } as unknown as IWhatsAppEngine);
     const module = await Test.createTestingModule({
       providers: [
@@ -110,19 +115,18 @@ describe('a keyed Baileys send refused before its message is built', () => {
     await ds.destroy();
   });
 
-  const withKey = async (): Promise<unknown> => {
+  const keyed = async (handler: string, request: object, run: () => Promise<unknown>): Promise<unknown> => {
     const context = {
       getType: () => 'http',
-      getHandler: () => ({ name: 'sendText' }),
+      getHandler: () => ({ name: handler }),
       switchToHttp: () => ({
-        getRequest: () => ({ headers: { 'idempotency-key': 'k-1' }, params: { sessionId: 'sess-1' }, body }),
+        getRequest: () => ({ headers: { 'idempotency-key': 'k-1' }, params: { sessionId: 'sess-1' }, body: request }),
         getResponse: () => ({ setHeader: jest.fn() }),
       }),
     } as unknown as ExecutionContext;
-    return lastValueFrom(
-      await interceptor.intercept(context, { handle: () => from(service.sendText('sess-1', body)) }),
-    );
+    return lastValueFrom(await interceptor.intercept(context, { handle: () => from(run()) }));
   };
+  const withKey = (): Promise<unknown> => keyed('sendText', body, () => service.sendText('sess-1', body));
   const keyState = async () =>
     (await ds.getRepository(SendIdempotencyKey).findOneBy({ idempotencyKey: 'k-1' }))?.state ?? 'absent';
 
@@ -144,6 +148,24 @@ describe('a keyed Baileys send refused before its message is built', () => {
     await expect(withKey()).rejects.toMatchObject({ status: 404 });
     expect(sock.sendMessage).not.toHaveBeenCalled();
     expect(await keyState()).toBe('absent');
+  });
+
+  it('with a reply or forward naming a message stored under another chat keeps its 404 and frees the key', async () => {
+    sock.onWhatsApp.mockImplementation((jid: string) => Promise.resolve([{ jid, exists: true }]));
+    stored = {
+      key: { id: 'Q1', remoteJid: '628999000111@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'q' },
+    };
+    const reply = { chatId: '628123456789@c.us', quotedMessageId: 'Q1', text: 'hello' };
+    const forward = { fromChatId: '628123456789@c.us', toChatId: '628123456789@c.us', messageId: 'Q1' };
+
+    await expect(keyed('reply', reply, () => service.reply('sess-1', reply))).rejects.toMatchObject({ status: 404 });
+    expect(await keyState()).toBe('absent');
+    await expect(keyed('forward', forward, () => service.forward('sess-1', forward))).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(await keyState()).toBe('absent');
+    expect(sock.sendMessage).not.toHaveBeenCalled();
   });
 
   it('keeps the key of a send that failed once the message was handed to the socket', async () => {
