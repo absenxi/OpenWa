@@ -705,6 +705,8 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // `=== 'true'`: a typo keeps the main connection on its migrations, so an operator who meant to
     // opt into synchronize for api_keys/audit_logs silently does not get it.
     'MAIN_DATABASE_SYNCHRONIZE',
+    // Same for the data connection: on SQLite a typo silently runs the migration chain instead.
+    'DATABASE_SYNCHRONIZE',
     // Read with `=== 'true'` by the plugin ingress gate: a typo turns an intentional
     // `ALLOW_UNSIGNED_INGRESS=true` back off, and a route the operator meant to open stops loading.
     'ALLOW_UNSIGNED_INGRESS',
