@@ -80,9 +80,11 @@ export class PluginPackageScanner {
    * and report registry entries whose code the scan did not find.
    */
   scanAtBoot(): void {
+    // Packages this scan found on disk but could not load, already logged with their reason.
+    const failedLoads = new Set<string>();
     // User plugins, if the directory exists. Built-in plugins register themselves programmatically.
     if (fs.existsSync(this.pluginsDir)) {
-      this.loadPluginsFromDirectory(this.pluginsDir);
+      this.loadPluginsFromDirectory(this.pluginsDir, failedLoads);
     }
 
     // COMPATIBILITY PATH — hosts that installed plugins before the package dir moved under <dataDir>.
@@ -102,7 +104,7 @@ export class PluginPackageScanner {
           `volume is destroyed on the next container recreate.`,
         { action: 'plugins_legacy_dir', legacyDir: this.legacyPluginsDir, pluginsDir: this.pluginsDir },
       );
-      this.loadPluginsFromDirectory(this.legacyPluginsDir);
+      this.loadPluginsFromDirectory(this.legacyPluginsDir, failedLoads);
     }
 
     this.logger.log(`Loaded ${this.plugins.size} plugins`, {
@@ -110,7 +112,7 @@ export class PluginPackageScanner {
       count: this.plugins.size,
     });
 
-    this.warnOnRegistryEntriesWithoutCode();
+    this.warnOnRegistryEntriesWithoutCode(failedLoads);
   }
 
   /**
@@ -121,10 +123,13 @@ export class PluginPackageScanner {
    * makes the divergence self-diagnosing.
    *
    * Built-ins are excluded: they are registered programmatically at bootstrap (after this runs) and
-   * never have a package directory at all.
+   * never have a package directory at all. So is a package that is there but failed to load: its code
+   * is not missing, and a reinstall is refused for the reason already logged.
    */
-  private warnOnRegistryEntriesWithoutCode(): void {
-    const orphaned = this.pluginStorage.getAllEntries().filter(e => !e.builtIn && !this.plugins.has(e.id));
+  private warnOnRegistryEntriesWithoutCode(failedLoads: ReadonlySet<string>): void {
+    const orphaned = this.pluginStorage
+      .getAllEntries()
+      .filter(e => !e.builtIn && !this.plugins.has(e.id) && !failedLoads.has(e.id));
     if (orphaned.length === 0) return;
 
     const missingDir = fs.existsSync(this.pluginsDir) ? '' : ' (that directory does not exist)';
@@ -137,7 +142,7 @@ export class PluginPackageScanner {
     );
   }
 
-  private loadPluginsFromDirectory(dir: string): void {
+  private loadPluginsFromDirectory(dir: string, failedLoads: Set<string>): void {
     // Reconcile any interrupted-update leftovers BEFORE scanning, so a crash mid-swap can't make a
     // plugin silently vanish while its registry entry still claims it is installed.
     this.recoverInterruptedUpdates(dir);
@@ -233,6 +238,14 @@ export class PluginPackageScanner {
         // re-enables it (ensureRegistryEntry resets the status on a successful load). No-op when
         // no entry exists (a hand-placed dir that never loaded).
         this.pluginStorage.setPluginStatus(entry.name, PluginStatus.ERROR);
+        // Keyed by folder and by manifest id, which differ for a hand-placed folder.
+        failedLoads.add(entry.name);
+        try {
+          const { id } = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as { id?: unknown };
+          if (typeof id === 'string') failedLoads.add(id);
+        } catch {
+          // A manifest that does not parse names no id; the folder name stands for it.
+        }
       }
     }
   }
