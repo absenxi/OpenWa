@@ -149,15 +149,14 @@ describe('Test lane partition', () => {
    * sees it, yet its PostgreSQL half runs only in this job. Dropping it from both workflows at once
    * leaves release-gate-parity green (the two still agree) and the scenarios silently SQLite-only. A
    * hand-kept list cannot see a spec nobody added to it, so the list is every plain spec on disk that
-   * compares DATABASE_TYPE with postgres.
+   * compares DATABASE_TYPE with postgres (`===`, `!==`, or the loose forms). A spec that reads the variable
+   * into another name first is not seen; compare it in place.
    */
   const dialectSwitchedSpecs = (): string[] =>
     (readdirSync(join(repoRoot, 'src'), { recursive: true }) as string[])
       .map(path => `src/${path.split('\\').join('/')}`)
       .filter(path => path.endsWith('.spec.ts') && !path.endsWith('.pg.spec.ts'))
-      .filter(path =>
-        /process\.env\.DATABASE_TYPE\s*===\s*['"]postgres['"]/.test(readFileSync(join(repoRoot, path), 'utf8')),
-      )
+      .filter(path => /DATABASE_TYPE\s*[!=]==?\s*['"]postgres['"]/.test(readFileSync(join(repoRoot, path), 'utf8')))
       .sort();
 
   it.each(['ci.yml', 'release.yml'])('runs the dialect-switched specs in the %s test-postgres job', file => {
