@@ -491,4 +491,46 @@ describe('Baileys disappearing timer changed around a chat deletion', () => {
 
     expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
   });
+
+  // A history record snapshotted while the timer was still on, delivered after it was turned off.
+  const staleRecord = (): Partial<Chat> => ({
+    id: PEER,
+    conversationTimestamp: 1_799_999_950,
+    ephemeralExpiration: DAY,
+    ephemeralSettingTimestamp: 1_799_000_000,
+  });
+  function turnedOff() {
+    const store = timedChat();
+    store.upsertChats([{ id: PEER, ephemeralSettingTimestamp: 1_799_999_000, ephemeralExpiration: null }]);
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+    return store;
+  }
+
+  it('a record setting an older timer than the one applied does not bring it back once the chat is deleted', () => {
+    const store = turnedOff();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(DELETED_AT_MS);
+    store.removeChats([PEER]);
+    now.mockReturnValue(DELETED_AT_MS + 60_000);
+    store.upsertChats([staleRecord()]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+  });
+
+  it('a record setting an older timer than the one applied does not bring it back on a listed chat', () => {
+    const store = turnedOff();
+    const record = staleRecord();
+    store.upsertChats([record]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBeUndefined();
+    expect(store.listChats()[0]).toMatchObject({ timestamp: 1_799_999_950 });
+    // The library's payload is left as it came.
+    expect(record).toMatchObject({ ephemeralExpiration: DAY, ephemeralSettingTimestamp: 1_799_000_000 });
+  });
+
+  it('a record that names no setting time still applies its timer, as nothing tells its age', () => {
+    const store = turnedOff();
+    store.upsertChats([{ id: PEER, ephemeralExpiration: DAY }]);
+
+    expect(store.getEphemeralExpiration(PEER)).toBe(DAY);
+  });
 });
