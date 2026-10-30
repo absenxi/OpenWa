@@ -67,9 +67,12 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
   const themeLabel = t(`theme.${theme}`);
   // toggleTheme cycles light, dark, system. The button's name starts with the mode it shows, the words a voice user
   // says to press it, then names the mode a click selects.
-  const themeButtonName = `${themeLabel}, ${t('theme.toggleTo', {
-    value: t(`theme.${theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'}`),
-  })}`;
+  const themeButtonName = t('common.joinedName', {
+    first: themeLabel,
+    second: t('theme.toggleTo', {
+      value: t(`theme.${theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'}`),
+    }),
+  });
 
   const { scoped } = useRole();
   const navItems = allNavItems.filter(
@@ -192,7 +195,7 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
 
   const currentLang = resolveSupportedLanguage(i18n.resolvedLanguage || i18n.language);
   const languageLabel = languageOptions.find(option => option.value === currentLang)?.compactLabel ?? 'EN';
-  const languageButtonName = `${languageLabel}, ${t('common.changeLanguage')}`;
+  const languageButtonName = t('common.joinedName', { first: languageLabel, second: t('common.changeLanguage') });
   const changeLanguage = (language: SupportedLanguage) => {
     setIsLanguageMenuOpen(false);
     void i18n.changeLanguage(language);

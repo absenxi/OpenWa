@@ -39,6 +39,7 @@
     "fieldTooLong": "최대 {{max}}자입니다(현재 {{count}}자).",
     "language": "언어",
     "changeLanguage": "언어 변경",
+    "joinedName": "{{first}}, {{second}}",
     "back": "뒤로",
     "next": "다음",
     "previous": "이전",

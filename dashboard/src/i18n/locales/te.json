@@ -39,6 +39,7 @@
     "fieldTooLong": "పరిమితి {{max}} అక్షరాలు (ప్రస్తుతం {{count}}).",
     "language": "భాష",
     "changeLanguage": "భాషను మార్చండి",
+    "joinedName": "{{first}}, {{second}}",
     "back": "వెనుకకు",
     "next": "తరువాత",
     "previous": "మునుపటి",

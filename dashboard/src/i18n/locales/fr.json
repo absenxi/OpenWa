@@ -41,6 +41,7 @@
     "fieldTooLong": "Limité à {{max}} caractères ({{count}} actuellement).",
     "language": "Langue",
     "changeLanguage": "Changer de langue",
+    "joinedName": "{{first}}, {{second}}",
     "back": "Retour",
     "next": "Suivant",
     "previous": "Précédent",

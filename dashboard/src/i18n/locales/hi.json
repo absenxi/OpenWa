@@ -39,6 +39,7 @@
     "fieldTooLong": "{{max}} वर्णों तक सीमित (अभी {{count}})।",
     "language": "भाषा",
     "changeLanguage": "भाषा बदलें",
+    "joinedName": "{{first}}, {{second}}",
     "back": "पीछे",
     "next": "अगला",
     "previous": "पिछला",
