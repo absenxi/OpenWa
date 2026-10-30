@@ -292,7 +292,8 @@ export class StorageService implements OnModuleDestroy {
    * root), so a caller reconciling one subtree neither pages the whole store nor walks the rest.
    *
    * The local dir is walked first and its keys remembered, so a key in both is listed once: on an
-   * S3 deployment it holds only what was written during an outage, while the bucket can hold an
+   * S3 deployment it holds what was written during an outage (and, after a move from local storage, the old
+   * local media until it is cleaned up), while the bucket can hold an
    * archive of millions of files that the S3 pages then stream past without being kept.
    *
    * A local directory the walk cannot read fails it, so no caller is handed a short listing without
