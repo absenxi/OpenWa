@@ -119,6 +119,7 @@ function ChatComposer({
 
   // References
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
 
   // Popular emojis
   const popularEmojis = [
@@ -206,6 +207,10 @@ function ChatComposer({
 
     const textToSend = messageInput.trim();
     if (!textToSend && !attachment) return;
+
+    // The field takes focus before the Send button disables (it does once the text is cleared): the browser drops
+    // focus from a disabled control to the page, and the next message would be typed nowhere.
+    textInputRef.current?.focus();
 
     // Text that cannot travel with an audio file stays in the input to be sent as its own message.
     if (!attachmentIsAudio) setMessageInput('');
@@ -394,7 +399,9 @@ function ChatComposer({
               }
               value={messageInput}
               onChange={e => setMessageInput(e.target.value)}
-              disabled={!canWrite || sending}
+              // Never disabled by a send: it holds focus through it, and handleSend refuses a second send meanwhile.
+              disabled={!canWrite}
+              ref={textInputRef}
               className="message-text-input"
             />
             <button

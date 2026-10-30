@@ -4304,3 +4304,90 @@ test('a failed chat list says so and offers the read again, then clears once a r
   await screen.findByText('Alice');
   assert.equal(screen.queryByRole('alert') === null, true, 'the failure stayed after the list was read');
 });
+
+// ── The message field stays usable while a send is out ─────────────────────────
+
+// Disabling the field that holds focus makes the browser drop focus to the page (the HTML focus fixup rule), so
+// pressing Enter to send would leave the next keystrokes going nowhere. The field stays enabled while a send is
+// out; the send handler already refuses a second send meanwhile.
+test('the message field keeps focus while a sent message is on its way', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+
+  const releaseSend = holdSend();
+  const input = screen.getByPlaceholderText('Type a message...') as HTMLInputElement;
+  input.focus();
+  fireEvent.change(input, { target: { value: 'first line' } });
+  fireEvent.submit(input.closest('form') as HTMLFormElement);
+  await within(thread).findByText('first line');
+
+  try {
+    assert.equal(input.disabled, false, 'the focused message field was disabled while the send was out');
+    assert.equal(document.activeElement === input, true, 'the message field lost focus during the send');
+  } finally {
+    releaseSend();
+    await waitFor(() => assert.equal(countFetchCalls('POST', `/api/sessions/${SESSION.id}/messages/send-text`), 1));
+    await flush();
+  }
+});
+
+// The field being typable during a send must not make a second send possible before the first is answered.
+test('Enter pressed again while a send is out sends nothing and keeps the text typed', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+
+  const releaseSend = holdSend();
+  const input = screen.getByPlaceholderText('Type a message...') as HTMLInputElement;
+  const form = input.closest('form') as HTMLFormElement;
+  fireEvent.change(input, { target: { value: 'first line' } });
+  fireEvent.submit(form);
+  await within(thread).findByText('first line');
+  fireEvent.change(input, { target: { value: 'second line' } });
+  fireEvent.submit(form);
+
+  releaseSend();
+  const sendPath = `/api/sessions/${SESSION.id}/messages/send-text`;
+  await waitFor(() => assert.equal(countFetchCalls('POST', sendPath), 1));
+  await flush();
+  assert.equal(countFetchCalls('POST', sendPath), 1, 'a second send went out while the first was in flight');
+  assert.equal(input.value, 'second line');
+  assert.equal(within(thread).queryByText('second line') === null, true, 'the refused text was drawn as sent');
+});
+
+// Activating Send puts focus on the button, which disables once the sent text is cleared. The field takes focus
+// first, so a keyboard user can type the next message at once.
+test('sending with the Send button leaves focus in the message field', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+  fireEvent.click(await screen.findByText('Alice'));
+  const thread = container.querySelector('.room-messages') as HTMLElement;
+  await within(thread).findByText('hello from alice');
+
+  const releaseSend = holdSend();
+  fireEvent.change(screen.getByPlaceholderText('Type a message...'), { target: { value: 'by the button' } });
+  const send = screen.getByRole('button', { name: 'Send' });
+  send.focus();
+  fireEvent.click(send);
+  await within(thread).findByText('by the button');
+
+  try {
+    assert.equal(
+      document.activeElement?.getAttribute('placeholder'),
+      'Type a message...',
+      'focus stayed on the Send button the send disabled',
+    );
+  } finally {
+    releaseSend();
+    await waitFor(() => assert.equal(countFetchCalls('POST', `/api/sessions/${SESSION.id}/messages/send-text`), 1));
+    await flush();
+  }
+});
