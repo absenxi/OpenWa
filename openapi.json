@@ -4435,7 +4435,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -4595,7 +4595,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -4716,7 +4716,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -4867,7 +4867,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5017,7 +5017,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5168,7 +5168,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5319,7 +5319,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5461,7 +5461,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5602,7 +5602,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5752,7 +5752,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -5896,7 +5896,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -6140,7 +6140,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read or a connection replaced before the message was written.",
+            "description": "Optional. Makes the send safe to retry: within 24 hours, a retry with the same key and body replays the first response (marked `Idempotent-Replayed: true`) instead of sending again. 1-255 visible ASCII characters, unique per session. While the first request runs a retry gets 409 `IDEMPOTENCY_KEY_IN_PROGRESS`; after a failure that may have sent the message it gets 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`. A 4xx or 501 refusal before the engine call frees the key. Errors from an engine send keep it taken whatever their HTTP status, including 409, unless the engine proves that nothing was sent: a transport failure before the message was handed over, a WhatsApp rate limit, media it could not fetch, or, on Baileys, a sticker or preview image it could not read, a recipient WhatsApp reports as not registered, a quoted or forwarded message it does not hold or holds under another chat, or a connection replaced before the message was written.",
             "required": false,
             "schema": {
               "type": "string"
@@ -6820,6 +6820,16 @@
           },
           "404": {
             "description": "No stored media for this message — it carries no media, media download was disabled or the payload was over the cap when it was stored (size-only marker), it was a URL-based API send (the gateway stores none of those bytes, though on whatsapp-web.js the own-send echo may), or the message is not in this gateway’s history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On S3 storage, the gateway already has 50 media downloads open across the status and chat media routes. Retry once the Retry-After header (1 second) has passed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14947,6 +14957,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "On S3 storage, the gateway already has 50 media downloads open across the status and chat media routes. Retry once the Retry-After header (1 second) has passed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "summary": "Stream a stored status media file",
@@ -19294,7 +19314,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890@c.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890@c.us)",
             "example": "1234567890@c.us"
           },
           "messageIds": {
@@ -19334,7 +19354,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890@c.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890@c.us)",
             "example": "1234567890@c.us"
           }
         },
@@ -19423,7 +19443,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890@c.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890@c.us)",
             "example": "1234567890@c.us"
           }
         },
@@ -19437,7 +19457,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890-123@g.us)",
             "example": "1234567890-123@g.us"
           },
           "archive": {
@@ -19456,7 +19476,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890-123@g.us)",
             "example": "1234567890-123@g.us"
           },
           "muteUntil": {
@@ -19479,7 +19499,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890-123@g.us)",
             "example": "1234567890-123@g.us"
           },
           "pin": {
@@ -19498,7 +19518,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890-123@g.us)",
             "example": "1234567890-123@g.us"
           }
         },
@@ -19512,7 +19532,7 @@
           "chatId": {
             "type": "string",
             "maxLength": 255,
-            "description": "Chat ID, in the active engine's native format (e.g. 1234567890@c.us)",
+            "description": "Chat ID in the neutral form the gateway returns, on either engine (e.g. 1234567890@c.us)",
             "example": "1234567890@c.us"
           },
           "state": {
@@ -23526,7 +23546,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Contact id in the active engine's native format. On Baileys this is frequently an `@lid` rather than a phone-number JID; use GET /contacts/{contactId}/phone to resolve one.",
+            "description": "Contact id in the neutral form both engines return (`<phone>@c.us`, never `@s.whatsapp.net`). On Baileys this is frequently an `@lid` rather than a phone-number JID; use GET /contacts/{contactId}/phone to resolve one.",
             "example": "628123456789@c.us"
           },
           "name": {
@@ -23704,7 +23724,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Owner id in the engine's native format.",
+            "description": "Owner id in the neutral form both engines return: `<phone>@c.us`, or `<lid>@lid` when the phone is not known.",
             "example": "628123456789@c.us"
           },
           "createdAt": {
@@ -23728,7 +23748,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Participant id in the engine's native format.",
+            "description": "Participant id in the neutral form both engines return: `<phone>@c.us`, or `<lid>@lid` when the phone is not known.",
             "example": "628123456789@c.us"
           },
           "number": {
@@ -23785,7 +23805,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Owner id in the engine's native format.",
+            "description": "Owner id in the neutral form both engines return: `<phone>@c.us`, or `<lid>@lid` when the phone is not known.",
             "example": "628123456789@c.us"
           },
           "createdAt": {
