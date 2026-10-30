@@ -2,6 +2,7 @@ import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
 import { BaileysEvents, type BaileysEventsHost } from './baileys-events';
 import { BaileysHistory, type BaileysHistoryHost } from './baileys-history';
 import { BaileysSessionStore } from './baileys-session-store';
+import { baileysMessageText } from './baileys-message-mapper';
 import { createLogger } from '../../common/services/logger.service';
 import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
 
@@ -97,6 +98,12 @@ function build(overrides: Record<string, unknown> = {}): {
 
 const settle = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+};
+
+/** Wait until `done` holds, up to a deadline. */
+const until = async (done: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (!done() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
 };
 
 const inbound = (id: string, message: WAMessage['message']): WAMessage => ({
@@ -227,5 +234,37 @@ describe('Baileys chat list preview text', () => {
       inbound('H1', { ephemeralMessage: { message: { conversation: 'from before the link' } } }),
     ]);
     expect(store.listChats()[0]).toMatchObject({ lastMessage: 'from before the link', lastMessageType: 'text' });
+  });
+
+  // Some clients send a tapped native-flow button with its label only in the params: the reply is announced with
+  // that label as its body, so the preview shows it too.
+  it('previews a native-flow reply by the label it carries only in its params', async () => {
+    const { events, store, emitted } = build();
+    const reply: WAMessage['message'] = {
+      interactiveResponseMessage: {
+        nativeFlowResponseMessage: {
+          name: 'quick_reply',
+          paramsJson: '{"id":"opt-yes","display_text":"Yes, book it"}',
+        },
+      },
+    };
+    events.handleMessagesUpsert({ type: 'notify', messages: [inbound('NF1', reply)] });
+    await until(() => emitted.length > 0);
+    expect(emitted).toEqual(['Yes, book it']);
+    expect(store.listChats()[0]).toMatchObject({ lastMessage: 'Yes, book it', lastMessageType: 'text' });
+    expect(baileysMessageText({ ephemeralMessage: { message: reply } })).toBe('Yes, book it');
+  });
+
+  it('previews nothing of a native-flow reply whose params carry no id, as it is announced with no body', async () => {
+    const { events, store, emitted } = build();
+    const reply: WAMessage['message'] = {
+      interactiveResponseMessage: {
+        nativeFlowResponseMessage: { name: 'quick_reply', paramsJson: '{"display_text":"Yes, book it"}' },
+      },
+    };
+    events.handleMessagesUpsert({ type: 'notify', messages: [inbound('NF2', reply)] });
+    await until(() => emitted.length > 0);
+    expect(emitted).toEqual(['']);
+    expect(store.listChats()[0]).toMatchObject({ lastMessage: '' });
   });
 });

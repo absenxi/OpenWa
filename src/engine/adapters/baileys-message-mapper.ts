@@ -262,8 +262,9 @@ const CONTENT_WRAPPERS = [
 ] as const;
 
 /**
- * The text a message is announced with ({@link extractBaileysBody}), read inside its envelopes as
- * `normalizeMessageContent` would open them, at most five deep like the library. `''` when it carries none.
+ * The text a message is announced with ({@link extractBaileysBody}, else the label of a native-flow reply
+ * that carries it only in its params), read inside its envelopes as `normalizeMessageContent` would open
+ * them, at most five deep like the library. `''` when it carries none.
  */
 export function baileysMessageText(message: unknown): string {
   let content = message as Record<string, { message?: unknown } | null | undefined> | null | undefined;
@@ -272,7 +273,8 @@ export function baileysMessageText(message: unknown): string {
     if (!wrapper) break;
     content = content[wrapper]?.message as typeof content;
   }
-  return content ? extractBaileysBody(content) : '';
+  if (!content) return '';
+  return extractBaileysBody(content) || extractBaileysButtonReply(content, 'interactiveResponseMessage')?.text || '';
 }
 
 /**
